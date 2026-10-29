@@ -70,8 +70,8 @@ const char *names_label(void)
 	return g_label;
 }
 
-/* The console's IPv4 address on the asker's subnet (the first one otherwise). */
-static int my_address(struct in_addr peer, struct in_addr *out)
+/* The console's IPv4 address on the asker's subnet (the first one otherwise); wsd.c uses it too. */
+int names_address(struct in_addr peer, struct in_addr *out)
 {
 	struct ifaddrs *list, *i;
 	int found = 0;
@@ -132,7 +132,7 @@ static void nbns_handle(int fd, const uint8_t *q, ssize_t n, struct sockaddr_in 
 		return;
 	nb_decode(q + 13, name, &suffix);
 	type = (uint16_t)(q[12 + 34] << 8 | q[12 + 34 + 1]);
-	if (my_address(from->sin_addr, &me) < 0)
+	if (names_address(from->sin_addr, &me) < 0)
 		return;
 	memcpy(r, q, 2); /* the transaction id */
 	if (type == 0x20 && !strcasecmp(name, smbd_name) && (suffix == 0x00 || suffix == 0x20)) {
@@ -239,7 +239,7 @@ static void dns_handle(int fd, int mdns, const uint8_t *q, ssize_t n, struct soc
 		snprintf(want, sizeof(want), "%s", smbd_name);
 	if (strcasecmp(name, want) || (type != 1 && type != 255) || (klass & 0x7FFF) != 1)
 		return;
-	if (my_address(from->sin_addr, &me) < 0)
+	if (names_address(from->sin_addr, &me) < 0)
 		return;
 	unicast = !mdns || legacy || (klass & 0x8000);
 

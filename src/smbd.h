@@ -30,6 +30,11 @@ extern char smbd_name[16];
 void names_set(const char *console_name);
 const char *names_label(void);
 void names_start(void);
+struct in_addr;
+int names_address(struct in_addr peer, struct in_addr *out);
+
+/* WS-Discovery (wsd.c): the console in Windows' Network view. */
+void wsd_start(void);
 
 /* The srvsvc pipe on IPC$ (rpc.c), which lists the shares. */
 int rpc_init(void);

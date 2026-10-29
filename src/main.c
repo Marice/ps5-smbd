@@ -122,6 +122,7 @@ int main(void)
 	if (rpc_init() < 0)
 		smbd_log("srvsvc off: \\\\<console> will not list the shares");
 	names_start();
+	wsd_start();
 	memset(&server, 0, sizeof(server));
 	server.handlers = &smbd_handlers;
 	server.port = SMBD_PORT;
