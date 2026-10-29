@@ -31,7 +31,7 @@ $(ELF): require-sdk .deps/ps5/lib/libsmb2.a $(SRCS) $(HDRS)
 # The same server on this computer, on port 4450, sharing two folders under build/ (for tests).
 host: .deps/host/lib/libsmb2.a $(SRCS) $(HDRS)
 	mkdir -p build/data build/mnt
-	cc $(CFLAGS) -DSMBD_HOST -DSMBD_PORT=4450 -DSMBD_DATA='"$(CURDIR)/build/data"' -DSMBD_MNT='"$(CURDIR)/build/mnt"' \
+	cc $(CFLAGS) -DSMBD_HOST -DSMBD_PORT=4450 -DSMBD_DATA='"$(CURDIR)/build/data"' -DSMBD_MNT='"$(CURDIR)/build/mnt"' -DSMBD_TRACE_FILE='"$(CURDIR)/build/smbd.log"' \
 	  -I.deps/host/include -I.deps/build-host/libsmb2-727feaaa6d0f4fed1bae57745fbc2c5db9a30e64/include -o ps5-smbd-host $(SRCS) \
 	  .deps/host/lib/libsmb2.a
 

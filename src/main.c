@@ -15,6 +15,9 @@
 #ifndef SMBD_PORT
 #define SMBD_PORT 445
 #endif
+#ifndef SMBD_TRACE_FILE
+#define SMBD_TRACE_FILE "/data/ps5-smbd/smbd.log"
+#endif
 #ifndef SMBD_MAX_CLIENTS
 #define SMBD_MAX_CLIENTS 8
 #endif
@@ -38,6 +41,17 @@ void smbd_log(const char *fmt, ...)
 	/* stdout of a payload goes to the kernel log (klogsrv shows it) */
 	printf("[ps5-smbd] %s\n", line);
 	fflush(stdout);
+	/* with tracing on, a file too: a payload started by a payload manager may not reach the kernel log */
+	if (smbd_trace) {
+		static FILE *log;
+
+		if (!log)
+			log = fopen(SMBD_TRACE_FILE, "a");
+		if (log) {
+			fprintf(log, "%ld %s\n", (long)time(NULL), line);
+			fflush(log);
+		}
+	}
 }
 
 static void on_error(struct smb2_context *smb2, const char *text)
@@ -57,12 +71,27 @@ static void on_new_client(struct smb2_context *smb2, void *cb_data)
 	smb2_register_error_callback(smb2, on_error);
 }
 
+#ifndef SMBD_HOST
+/* The process's name in the console's process list (and PayLoader's Running screen), instead of "payload". */
+int sceKernelSetProcessName(const char *name);
+#endif
+
 int main(void)
 {
 	static struct smb2_server server;
 	int err;
 
+#ifndef SMBD_HOST
+	sceKernelSetProcessName("ps5-smbd.elf");
+#endif
 	signal(SIGPIPE, SIG_IGN);
+	{
+		FILE *f = fopen("/data/ps5-smbd/trace", "r"); /* the switch: its presence, not its content */
+
+		smbd_trace = getenv("SMBD_TRACE") != NULL || f != NULL;
+		if (f)
+			fclose(f);
+	}
 	memset(&server, 0, sizeof(server));
 	server.handlers = &smbd_handlers;
 	server.port = SMBD_PORT;

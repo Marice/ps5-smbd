@@ -21,4 +21,6 @@ extern const int smbd_share_count;
 /* The request handlers, on the console's own file system (fs.c). */
 extern struct smb2_server_request_handlers smbd_handlers;
 
+extern int smbd_trace;
+
 void smbd_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

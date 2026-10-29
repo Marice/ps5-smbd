@@ -28,6 +28,9 @@
    built from this exact pinned version (tools/build-libsmb2.sh), so its private header matches. */
 #include "libsmb2-private.h"
 
+/* every request in the kernel log: SMBD_TRACE in the environment, or a file named trace next to /data/ps5-smbd */
+int smbd_trace;
+
 #define MAX_HANDLES 256
 #define MAX_TREES 16
 #define TREE_IPC (-1)
@@ -182,7 +185,7 @@ static int reply(struct smb2_context *smb2, uint8_t command, uint32_t status)
 	struct smb2_error_reply err;
 	struct smb2_pdu *pdu;
 
-	if (getenv("SMBD_TRACE"))
+	if (smbd_trace)
 		smbd_log("command %u -> status %08x", command, status);
 	memset(&err, 0, sizeof(err));
 	pdu = smb2_cmd_error_reply_async(smb2, &err, command, (int)status, NULL, NULL);
@@ -530,7 +533,7 @@ static int open_file(struct smb2_server *srvr, struct smb2_context *smb2, struct
 	make_fid(rep->file_id, index, h->generation);
 	memcpy(c->last_created, rep->file_id, SMB2_FD_SIZE);
 	c->have_last_created = 1;
-	if (getenv("SMBD_TRACE"))
+	if (smbd_trace)
 		smbd_log("open %s (disposition %u, options %08x, access %08x): handle %d", path, disp, req->create_options,
 		         req->desired_access, index);
 	return 0;
@@ -683,6 +686,7 @@ static int ioctl_file(struct smb2_server *srvr, struct smb2_context *smb2, struc
 	   gives up on that check); copy-chunk, DFS and the rest: not here. */
 	if (req->ctl_code == SMB2_FSCTL_DFS_GET_REFERRALS || req->ctl_code == SMB2_FSCTL_DFS_GET_REFERRALS_EX)
 		return reply(smb2, SMB2_IOCTL, SMB2_STATUS_NOT_FOUND);
+	smbd_log("ioctl %08x not answered", req->ctl_code);
 	return reply(smb2, SMB2_IOCTL, SMB2_STATUS_NOT_SUPPORTED);
 }
 
@@ -767,8 +771,10 @@ static int query_directory(struct smb2_server *srvr, struct smb2_context *smb2,
 	if (!h->is_dir)
 		return reply(smb2, SMB2_QUERY_DIRECTORY, SMB2_STATUS_INVALID_PARAMETER);
 	if (req->file_information_class != SMB2_FILE_ID_BOTH_DIRECTORY_INFORMATION &&
-	    req->file_information_class != SMB2_FILE_ID_FULL_DIRECTORY_INFORMATION)
+	    req->file_information_class != SMB2_FILE_ID_FULL_DIRECTORY_INFORMATION) {
+		smbd_log("listing: class %u not answered", req->file_information_class);
 		return reply(smb2, SMB2_QUERY_DIRECTORY, SMB2_STATUS_INVALID_INFO_CLASS);
+	}
 
 	if ((req->flags & (SMB2_RESTART_SCANS | SMB2_REOPEN)) || !h->dir) {
 		if (h->dir)
@@ -840,7 +846,7 @@ static int query_directory(struct smb2_server *srvr, struct smb2_context *smb2,
 		return reply(smb2, SMB2_QUERY_DIRECTORY,
 		             first_call ? SMB2_STATUS_NO_SUCH_FILE : SMB2_STATUS_NO_MORE_FILES);
 	}
-	if (getenv("SMBD_TRACE"))
+	if (smbd_trace)
 		smbd_log("listing %s (%s, class %u): %d entries", h->path, h->pattern, req->file_information_class, count);
 	c->scratch = out;
 	memset(rep, 0, sizeof(*rep));
@@ -951,8 +957,7 @@ static int query_info(struct smb2_server *srvr, struct smb2_context *smb2, struc
 			break;
 		}
 		default:
-			if (getenv("SMBD_TRACE"))
-				smbd_log("query info: file class %u not answered", req->file_info_class);
+			smbd_log("query info: file class %u not answered", req->file_info_class);
 			return reply(smb2, SMB2_QUERY_INFO, SMB2_STATUS_NOT_SUPPORTED);
 		}
 	} else if (req->info_type == SMB2_0_INFO_FILESYSTEM) {
@@ -1029,10 +1034,12 @@ static int query_info(struct smb2_server *srvr, struct smb2_context *smb2, struc
 			break;
 		}
 		default:
+			smbd_log("query info: file system class %u not answered", req->file_info_class);
 			return reply(smb2, SMB2_QUERY_INFO, SMB2_STATUS_NOT_SUPPORTED);
 		}
 	} else {
 		/* security descriptors and quotas: not kept here */
+		smbd_log("query info: type %u class %u not answered", req->info_type, req->file_info_class);
 		return reply(smb2, SMB2_QUERY_INFO, SMB2_STATUS_NOT_SUPPORTED);
 	}
 	if (!out)
