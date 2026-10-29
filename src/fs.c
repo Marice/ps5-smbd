@@ -33,6 +33,10 @@ int smbd_trace;
 
 #define MAX_HANDLES 256
 #define MAX_TREES 16
+#define MAX_NOTIFIES 32
+#ifndef SMB2_STATUS_NOTIFY_CLEANUP
+#define SMB2_STATUS_NOTIFY_CLEANUP 0x0000010B
+#endif
 #define TREE_IPC (-1)
 #define FILE_MODE 0777 /* as everything else on the console's homebrew side: a title won't start otherwise */
 
@@ -68,8 +72,16 @@ struct tree {
 	int share; /* index into smbd_shares, or TREE_IPC */
 };
 
+/* A change notify left pending: the reply is owed when the client cancels it or closes the folder. */
+struct notify {
+	int used;
+	uint64_t message_id;
+	int handle;
+};
+
 struct conn {
 	struct handle handles[MAX_HANDLES];
+	struct notify notifies[MAX_NOTIFIES];
 	struct tree trees[MAX_TREES];
 	uint32_t next_tree;
 	uint32_t generation;
@@ -178,6 +190,20 @@ static struct handle *find_handle(struct conn *c, const smb2_file_id fid_in)
 }
 
 /* ---- replies -------------------------------------------------------------------------------------------- */
+
+/* A reply of status only to the request with that message id (a pending one, answered later). */
+static void reply_to(struct smb2_context *smb2, uint8_t command, uint32_t status, uint64_t message_id)
+{
+	struct smb2_error_reply err;
+	struct smb2_pdu *pdu;
+
+	memset(&err, 0, sizeof(err));
+	pdu = smb2_cmd_error_reply_async(smb2, &err, command, (int)status, NULL, NULL);
+	if (pdu) {
+		smb2_set_pdu_message_id(smb2, pdu, message_id);
+		smb2_queue_pdu(smb2, pdu);
+	}
+}
 
 /* An error reply with a real status; the handler then returns this function's 1. */
 static int reply(struct smb2_context *smb2, uint8_t command, uint32_t status)
@@ -551,6 +577,13 @@ static int close_file(struct smb2_server *srvr, struct smb2_context *smb2, struc
 	(void)srvr;
 	if (!h)
 		return reply(smb2, SMB2_CLOSE, SMB2_STATUS_FILE_CLOSED);
+	/* a change notify still waiting on this folder ends now, before the close reply (MS-SMB2 3.3.5.10) */
+	for (int i = 0; i < MAX_NOTIFIES; i++) {
+		if (c->notifies[i].used && &c->handles[c->notifies[i].handle] == h) {
+			reply_to(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_NOTIFY_CLEANUP, c->notifies[i].message_id);
+			c->notifies[i].used = 0;
+		}
+	}
 	memset(rep, 0, sizeof(*rep));
 	if ((req->flags & SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB) && stat(h->path, &st) == 0) {
 		rep->flags = SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB;
@@ -661,11 +694,21 @@ static int lock_file(struct smb2_server *srvr, struct smb2_context *smb2, struct
 	return 0; /* granted: byte-range locks are not enforced */
 }
 
+/* The only requests left pending are change notifies: a cancel ends them (cancel itself has no reply). */
 static int cancel(struct smb2_server *srvr, struct smb2_context *smb2)
 {
+	struct conn *c = smb2_get_opaque(smb2);
+
 	(void)srvr;
-	(void)smb2;
-	return 1; /* nothing is ever pending; cancel has no reply */
+	if (!c)
+		return 1;
+	for (int i = 0; i < MAX_NOTIFIES; i++) {
+		if (c->notifies[i].used) {
+			reply_to(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_CANCELLED, c->notifies[i].message_id);
+			c->notifies[i].used = 0;
+		}
+	}
+	return 1;
 }
 
 static int echo(struct smb2_server *srvr, struct smb2_context *smb2)
@@ -855,15 +898,38 @@ static int query_directory(struct smb2_server *srvr, struct smb2_context *smb2,
 	return 0;
 }
 
+/* No change notifications are sent; like a Windows server that has none, the request is left pending (an
+   interim STATUS_PENDING) until the client cancels it or closes the folder. Answering NOT_SUPPORTED made
+   Explorer refuse to open the share ("The specified server cannot perform the requested operation"). */
 static int change_notify(struct smb2_server *srvr, struct smb2_context *smb2, struct smb2_change_notify_request *req,
                          struct smb2_change_notify_reply *rep)
 {
+	struct conn *c;
+	struct handle *h;
+	int slot = -1;
+
+	(void)srvr;
+	(void)rep;
 	if (!req)
 		return 1; /* a request cancelled while the connection is torn down */
-	(void)srvr;
-	(void)req;
-	(void)rep;
-	return reply(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_NOT_SUPPORTED);
+	c = conn_of(smb2);
+	h = c ? find_handle(c, req->file_id) : NULL;
+	if (!h)
+		return reply(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_FILE_CLOSED);
+	if (!h->is_dir)
+		return reply(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_INVALID_PARAMETER);
+	for (int i = 0; i < MAX_NOTIFIES; i++) {
+		if (!c->notifies[i].used) {
+			slot = i;
+			break;
+		}
+	}
+	if (slot < 0)
+		return reply(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_INSUFFICIENT_RESOURCES);
+	c->notifies[slot].used = 1;
+	c->notifies[slot].message_id = smb2->message_id;
+	c->notifies[slot].handle = (int)(h - c->handles);
+	return reply(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_PENDING);
 }
 
 /* ---- information ---------------------------------------------------------------------------------------- */
