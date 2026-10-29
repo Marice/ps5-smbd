@@ -55,6 +55,7 @@ struct handle {
 	int share;
 	int is_dir;
 	int fd;
+	void *pipe; /* a named pipe on IPC$ (rpc.c) instead of a file */
 	int delete_on_close;
 	char path[PATH_MAX];
 	/* directory listing state */
@@ -116,6 +117,8 @@ static struct conn *conn_of(struct smb2_context *smb2)
 
 static void handle_free(struct handle *h)
 {
+	if (h->pipe)
+		rpc_pipe_close(h->pipe);
 	if (h->fd >= 0)
 		close(h->fd);
 	if (h->dir)
@@ -438,6 +441,46 @@ static void fill_open_reply(struct smb2_create_reply *rep, const struct stat *st
 static int open_file(struct smb2_server *srvr, struct smb2_context *smb2, struct smb2_create_request *req,
                      struct smb2_create_reply *rep);
 
+/* A named pipe on IPC$: only srvsvc, which lists the shares (rpc.c). */
+static int open_pipe(struct conn *c, struct smb2_context *smb2, struct smb2_create_request *req,
+                     struct smb2_create_reply *rep)
+{
+	struct handle *h = NULL;
+	int index = -1;
+
+	if (!rpc_is_pipe(req->name)) {
+		smbd_log("pipe \"%s\" not served", req->name ? req->name : "");
+		return reply(smb2, SMB2_CREATE, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
+	}
+	for (int i = 0; i < MAX_HANDLES; i++) {
+		if (!c->handles[i].used) {
+			index = i;
+			break;
+		}
+	}
+	if (index < 0)
+		return reply(smb2, SMB2_CREATE, SMB2_STATUS_TOO_MANY_OPENED_FILES);
+	h = &c->handles[index];
+	memset(h, 0, sizeof(*h));
+	h->fd = -1;
+	h->pipe = rpc_pipe_open();
+	if (!h->pipe)
+		return reply(smb2, SMB2_CREATE, SMB2_STATUS_INSUFFICIENT_RESOURCES);
+	h->used = 1;
+	h->generation = ++c->generation;
+	h->share = TREE_IPC;
+	snprintf(h->path, sizeof(h->path), "\\PIPE\\srvsvc");
+	memset(rep, 0, sizeof(*rep));
+	rep->create_action = ACTION_OPENED;
+	rep->file_attributes = SMB2_FILE_ATTRIBUTE_NORMAL;
+	make_fid(rep->file_id, index, h->generation);
+	memcpy(c->last_created, rep->file_id, SMB2_FD_SIZE);
+	c->have_last_created = 1;
+	if (smbd_trace)
+		smbd_log("open pipe srvsvc: handle %d", index);
+	return 0;
+}
+
 /* The request (and its name) belongs to libsmb2, which frees it once a reply to it is queued: nothing may
    look at req after reply(). */
 static int create(struct smb2_server *srvr, struct smb2_context *smb2, struct smb2_create_request *req,
@@ -465,7 +508,7 @@ static int open_file(struct smb2_server *srvr, struct smb2_context *smb2, struct
 		return reply(smb2, SMB2_CREATE, SMB2_STATUS_INSUFFICIENT_RESOURCES);
 	share = request_share(c, smb2);
 	if (share == TREE_IPC)
-		return reply(smb2, SMB2_CREATE, SMB2_STATUS_OBJECT_NAME_NOT_FOUND); /* no pipes (srvsvc) yet */
+		return open_pipe(c, smb2, req, rep);
 	if (share < 0)
 		return reply(smb2, SMB2_CREATE, SMB2_STATUS_NETWORK_NAME_DELETED);
 	if (join_path(share, req->name, path, sizeof(path)))
@@ -637,6 +680,25 @@ static int read_file(struct smb2_server *srvr, struct smb2_context *smb2, struct
 	(void)srvr;
 	if (!h)
 		return reply(smb2, SMB2_READ, SMB2_STATUS_FILE_CLOSED);
+	if (h->pipe) {
+		int more = 0;
+		size_t got;
+
+		buf = malloc(req->length ? req->length : 1);
+		if (!buf)
+			return reply(smb2, SMB2_READ, SMB2_STATUS_INSUFFICIENT_RESOURCES);
+		got = rpc_pipe_read(h->pipe, buf, req->length, &more);
+		if (!got) {
+			free(buf);
+			return reply(smb2, SMB2_READ, SMB2_STATUS_PIPE_EMPTY);
+		}
+		if (more)
+			smbd_log("pipe read of %u left more behind", req->length);
+		memset(rep, 0, sizeof(*rep));
+		rep->data = buf;
+		rep->data_length = (uint32_t)got;
+		return 0;
+	}
 	if (h->fd < 0)
 		return reply(smb2, SMB2_READ, SMB2_STATUS_INVALID_DEVICE_REQUEST);
 	if (!req->length)
@@ -671,6 +733,13 @@ static int write_file(struct smb2_server *srvr, struct smb2_context *smb2, struc
 	(void)srvr;
 	if (!h)
 		return reply(smb2, SMB2_WRITE, SMB2_STATUS_FILE_CLOSED);
+	if (h->pipe) {
+		if (rpc_pipe_write(h->pipe, req->buf, req->length) < 0)
+			return reply(smb2, SMB2_WRITE, SMB2_STATUS_INVALID_PARAMETER);
+		memset(rep, 0, sizeof(*rep));
+		rep->count = req->length;
+		return 0;
+	}
 	if (h->fd < 0)
 		return reply(smb2, SMB2_WRITE, SMB2_STATUS_INVALID_DEVICE_REQUEST);
 	while (done < req->length) {
@@ -728,6 +797,48 @@ static int echo(struct smb2_server *srvr, struct smb2_context *smb2)
 	return 0;
 }
 
+/* A DCE/RPC request written to the pipe and its answer read back, in one ioctl (how Windows calls srvsvc).
+   libsmb2 copies an ioctl's output only in passthrough mode, so the reply is built here with it on. */
+static int pipe_transceive(struct smb2_context *smb2, struct smb2_ioctl_request *req, struct smb2_ioctl_reply *rep)
+{
+	struct conn *c = conn_of(smb2);
+	struct handle *h = c ? find_handle(c, req->file_id) : NULL;
+	uint32_t max = req->max_output_response ? req->max_output_response : 4280;
+	uint8_t *out;
+	size_t got;
+	int more = 0, was;
+	struct smb2_pdu *pdu;
+
+	if (!h || !h->pipe)
+		return reply(smb2, SMB2_IOCTL, SMB2_STATUS_INVALID_HANDLE);
+	if (rpc_pipe_write(h->pipe, req->input, req->input_count) < 0)
+		return reply(smb2, SMB2_IOCTL, SMB2_STATUS_INVALID_PARAMETER);
+	out = malloc(max);
+	if (!out)
+		return reply(smb2, SMB2_IOCTL, SMB2_STATUS_INSUFFICIENT_RESOURCES);
+	got = rpc_pipe_read(h->pipe, out, max, &more);
+	if (more)
+		smbd_log("pipe answer longer than the %u bytes asked for", max);
+	memset(rep, 0, sizeof(*rep));
+	rep->ctl_code = req->ctl_code;
+	memcpy(rep->file_id, req->file_id, SMB2_FD_SIZE);
+	rep->output_count = (uint32_t)got;
+	rep->output = out;
+	was = smb2->passthrough;
+	smb2->passthrough = 1;
+	pdu = smb2_cmd_ioctl_reply_async(smb2, rep, NULL, NULL);
+	smb2->passthrough = was;
+	free(out);
+	if (!pdu)
+		return reply(smb2, SMB2_IOCTL, SMB2_STATUS_INTERNAL_ERROR);
+	if (smbd_trace)
+		smbd_log("pipe transceive: %u bytes in, %zu out", req->input_count, got);
+	/* queued, the request is freed: req is not looked at again */
+	smb2_set_pdu_message_id(smb2, pdu, smb2->message_id);
+	smb2_queue_pdu(smb2, pdu);
+	return 1;
+}
+
 static int ioctl_file(struct smb2_server *srvr, struct smb2_context *smb2, struct smb2_ioctl_request *req,
                       struct smb2_ioctl_reply *rep)
 {
@@ -737,6 +848,8 @@ static int ioctl_file(struct smb2_server *srvr, struct smb2_context *smb2, struc
 	(void)rep;
 	/* libsmb2 answers FSCTL_VALIDATE_NEGOTIATE_INFO itself before calling us (if it doesn't, the client
 	   gives up on that check); copy-chunk, DFS and the rest: not here. */
+	if (req->ctl_code == SMB2_FSCTL_PIPE_TRANSCEIVE)
+		return pipe_transceive(smb2, req, rep);
 	if (req->ctl_code == SMB2_FSCTL_DFS_GET_REFERRALS || req->ctl_code == SMB2_FSCTL_DFS_GET_REFERRALS_EX)
 		return reply(smb2, SMB2_IOCTL, SMB2_STATUS_NOT_FOUND);
 	smbd_log("ioctl %08x not answered (input %u bytes)", req->ctl_code, req->input_count);
@@ -979,6 +1092,21 @@ static int query_info(struct smb2_server *srvr, struct smb2_context *smb2, struc
 	(void)srvr;
 	if (!h)
 		return reply(smb2, SMB2_QUERY_INFO, SMB2_STATUS_FILE_CLOSED);
+	if (h->pipe) {
+		struct smb2_file_standard_info *si;
+
+		if (req->info_type != SMB2_0_INFO_FILE || req->file_info_class != SMB2_FILE_STANDARD_INFORMATION)
+			return reply(smb2, SMB2_QUERY_INFO, SMB2_STATUS_NOT_SUPPORTED);
+		si = calloc(1, sizeof(*si));
+		if (!si)
+			return reply(smb2, SMB2_QUERY_INFO, SMB2_STATUS_INSUFFICIENT_RESOURCES);
+		si->number_of_links = 1;
+		c->scratch = si;
+		memset(rep, 0, sizeof(*rep));
+		rep->output_buffer = si;
+		rep->output_buffer_length = sizeof(*si);
+		return 0;
+	}
 	if ((h->fd >= 0 ? fstat(h->fd, &st) : stat(h->path, &st)) < 0)
 		return reply(smb2, SMB2_QUERY_INFO, status_of(errno));
 

@@ -74,7 +74,33 @@ static void on_new_client(struct smb2_context *smb2, void *cb_data)
 #ifndef SMBD_HOST
 /* The process's name in the console's process list (and PayLoader's Running screen), instead of "payload". */
 int sceKernelSetProcessName(const char *name);
+/* The console's name as set in Settings > System; parameter 6 on the PS4 and the PS5 (OpenOrbis'
+   SystemService.h; RommPS and SharpProspero read it so on the PS5). */
+int sceSystemServiceParamGetString(int param_id, char *buf, size_t size);
+#define SYSTEM_SERVICE_PARAM_ID_SYSTEM_NAME 6
 #endif
+
+/* The name to go by: the console's own, PS5 when it can't be read. */
+static void pick_name(void)
+{
+	char name[128] = "";
+
+#ifdef SMBD_HOST
+	snprintf(name, sizeof(name), "%s", getenv("SMBD_NAME") ? getenv("SMBD_NAME") : "PS5-HOST");
+#else
+	if (sceSystemServiceParamGetString(SYSTEM_SERVICE_PARAM_ID_SYSTEM_NAME, name, sizeof(name)) != 0)
+		name[0] = 0;
+	name[sizeof(name) - 1] = 0;
+	for (const char *c = name; *c; c++) {
+		if ((unsigned char)*c < 0x20) {
+			name[0] = 0; /* not a name */
+			break;
+		}
+	}
+#endif
+	names_set(name);
+	smbd_log("console name \"%s\": \\\\%s, %s.local", name, smbd_name, names_label());
+}
 
 int main(void)
 {
@@ -92,6 +118,10 @@ int main(void)
 		if (f)
 			fclose(f);
 	}
+	pick_name();
+	if (rpc_init() < 0)
+		smbd_log("srvsvc off: \\\\<console> will not list the shares");
+	names_start();
 	memset(&server, 0, sizeof(server));
 	server.handlers = &smbd_handlers;
 	server.port = SMBD_PORT;
@@ -99,12 +129,12 @@ int main(void)
 	   signing, and refuses guest sessions (docs/decision-log.md D1). */
 	server.signing_enabled = 1;
 	server.allow_anonymous = 0;
-	snprintf(server.hostname, sizeof(server.hostname), "PS5");
+	snprintf(server.hostname, sizeof(server.hostname), "%s", smbd_name);
 	snprintf(server.domain, sizeof(server.domain), "WORKGROUP");
 	for (int i = 0; i < 16; i++)
 		server.guid[i] = (uint8_t)(time(NULL) >> (i % 4 * 8)) ^ (uint8_t)(i * 37);
 
-	smbd_log("starting on port %d: \\\\<this console>\\%s and \\%s, login %s", SMBD_PORT, smbd_shares[0].name,
+	smbd_log("starting on port %d: \\\\%s\\%s and \\%s, login %s", SMBD_PORT, smbd_name, smbd_shares[0].name,
 	         smbd_shares[1].name, SMBD_USER);
 	err = smb2_serve_port(&server, SMBD_MAX_CLIENTS, on_new_client, NULL);
 	smbd_log("stopped (%d): is another SMB server already on port %d?", err, SMBD_PORT);
