@@ -1,0 +1,5 @@
+*.elf
+.deps/
+build/
+docs/decision-log.md
+ps5-smbd-host
