@@ -603,6 +603,8 @@ static int close_file(struct smb2_server *srvr, struct smb2_context *smb2, struc
 		if ((h->is_dir ? rmdir(h->path) : unlink(h->path)) < 0)
 			smbd_log("delete of %s failed: %s", h->path, strerror(errno));
 	}
+	if (smbd_trace)
+		smbd_log("close %s (handle %d)", h->path, (int)(h - c->handles));
 	handle_free(h);
 	return 0;
 }
@@ -649,6 +651,8 @@ static int read_file(struct smb2_server *srvr, struct smb2_context *smb2, struct
 		return reply(smb2, SMB2_READ, n == 0 ? SMB2_STATUS_END_OF_FILE : status_of(e));
 	}
 	memset(rep, 0, sizeof(*rep));
+	if (smbd_trace)
+		smbd_log("read %s: %zd at %llu", h->path, n, (unsigned long long)req->offset);
 	rep->data = buf; /* libsmb2 frees it with the reply */
 	rep->data_length = (uint32_t)n;
 	rep->data_remaining = 0;
@@ -679,6 +683,8 @@ static int write_file(struct smb2_server *srvr, struct smb2_context *smb2, struc
 		}
 		done += (size_t)n;
 	}
+	if (smbd_trace)
+		smbd_log("write %s: %zu at %llu", h->path, done, (unsigned long long)req->offset);
 	memset(rep, 0, sizeof(*rep));
 	rep->count = (uint32_t)done;
 	return 0;
@@ -702,6 +708,8 @@ static int cancel(struct smb2_server *srvr, struct smb2_context *smb2)
 	(void)srvr;
 	if (!c)
 		return 1;
+	if (smbd_trace)
+		smbd_log("cancel");
 	for (int i = 0; i < MAX_NOTIFIES; i++) {
 		if (c->notifies[i].used) {
 			reply_to(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_CANCELLED, c->notifies[i].message_id);
@@ -715,6 +723,8 @@ static int echo(struct smb2_server *srvr, struct smb2_context *smb2)
 {
 	(void)srvr;
 	(void)smb2;
+	if (smbd_trace)
+		smbd_log("echo");
 	return 0;
 }
 
@@ -729,7 +739,7 @@ static int ioctl_file(struct smb2_server *srvr, struct smb2_context *smb2, struc
 	   gives up on that check); copy-chunk, DFS and the rest: not here. */
 	if (req->ctl_code == SMB2_FSCTL_DFS_GET_REFERRALS || req->ctl_code == SMB2_FSCTL_DFS_GET_REFERRALS_EX)
 		return reply(smb2, SMB2_IOCTL, SMB2_STATUS_NOT_FOUND);
-	smbd_log("ioctl %08x not answered", req->ctl_code);
+	smbd_log("ioctl %08x not answered (input %u bytes)", req->ctl_code, req->input_count);
 	return reply(smb2, SMB2_IOCTL, SMB2_STATUS_NOT_SUPPORTED);
 }
 
@@ -929,6 +939,9 @@ static int change_notify(struct smb2_server *srvr, struct smb2_context *smb2, st
 	c->notifies[slot].used = 1;
 	c->notifies[slot].message_id = smb2->message_id;
 	c->notifies[slot].handle = (int)(h - c->handles);
+	if (smbd_trace)
+		smbd_log("change notify on %s left pending (message %llu)", h->path,
+		         (unsigned long long)smb2->message_id);
 	return reply(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_PENDING);
 }
 
@@ -1110,6 +1123,8 @@ static int query_info(struct smb2_server *srvr, struct smb2_context *smb2, struc
 	}
 	if (!out)
 		return reply(smb2, SMB2_QUERY_INFO, SMB2_STATUS_INSUFFICIENT_RESOURCES);
+	if (smbd_trace)
+		smbd_log("query info %s: type %u class %u answered", h->path, req->info_type, req->file_info_class);
 	c->scratch = out;
 	memset(rep, 0, sizeof(*rep));
 	rep->output_buffer = out;
@@ -1153,6 +1168,8 @@ static int set_info(struct smb2_server *srvr, struct smb2_context *smb2, struct 
 	(void)srvr;
 	if (!req)
 		return 1; /* a request cancelled while the connection is torn down */
+	if (smbd_trace)
+		smbd_log("set info: type %u class %u, %u bytes", req->info_type, req->file_info_class, req->buffer_length);
 	c = conn_of(smb2);
 	h = c ? find_handle(c, req->file_id) : NULL;
 	in = req->input_data;
