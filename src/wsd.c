@@ -77,6 +77,8 @@ static void random_uuid(char *out)
 	uint8_t b[16];
 	static uint64_t state;
 
+	/* the UDP and the HTTP thread both ask for ids */
+	pthread_mutex_lock(&g_lock);
 	if (!state)
 		state = (uint64_t)time(NULL) * 0x9E3779B97F4A7C15ull ^ (uint64_t)(uintptr_t)&state;
 	for (int i = 0; i < 16; i++) {
@@ -85,6 +87,7 @@ static void random_uuid(char *out)
 		state ^= state << 17;
 		b[i] = (uint8_t)state;
 	}
+	pthread_mutex_unlock(&g_lock);
 	b[6] = (uint8_t)((b[6] & 0x0F) | 0x40);
 	b[8] = (uint8_t)((b[8] & 0x3F) | 0x80);
 	format_uuid(b, out);
@@ -145,12 +148,15 @@ static int header(char *out, size_t size, const char *to, const char *action, co
 /* The device as Hello, ProbeMatch and ResolveMatch describe it. */
 static int device(char *out, size_t size, struct in_addr ip)
 {
+	char text[INET_ADDRSTRLEN];
+
+	inet_ntop(AF_INET, &ip, text, sizeof(text)); /* not inet_ntoa: its one buffer is shared by the threads */
 	return snprintf(out, size,
 	                "<wsa:EndpointReference><wsa:Address>urn:uuid:%s</wsa:Address></wsa:EndpointReference>"
 	                "<wsd:Types>wsdp:Device pub:Computer</wsd:Types>"
 	                "<wsd:XAddrs>http://%s:%d/%s</wsd:XAddrs>"
 	                "<wsd:MetadataVersion>1</wsd:MetadataVersion>",
-	                g_endpoint, inet_ntoa(ip), SMBD_WSD_HTTP_PORT, g_endpoint);
+	                g_endpoint, text, SMBD_WSD_HTTP_PORT, g_endpoint);
 }
 
 static void send_hello(int fd)
@@ -203,8 +209,12 @@ static void udp_message(int fd, char *msg, struct sockaddr_in *from)
 	n += snprintf(reply + n, sizeof(reply) - (size_t)n, "</wsd:%s></wsd:%ses></soap:Body></soap:Envelope>",
 	              what, what);
 	sendto(fd, reply, (size_t)n, 0, (struct sockaddr *)from, sizeof(*from));
-	if (smbd_trace)
-		smbd_log("wsd: %s answered for %s", probe ? "Probe" : "Resolve", inet_ntoa(from->sin_addr));
+	if (smbd_trace) {
+		char ip[INET_ADDRSTRLEN];
+
+		inet_ntop(AF_INET, &from->sin_addr, ip, sizeof(ip));
+		smbd_log("wsd: %s answered for %s", probe ? "Probe" : "Resolve", ip);
+	}
 }
 
 /* The metadata: this device, its model, and that it hosts a computer named so in the workgroup. */
@@ -258,19 +268,26 @@ static char *find_nocase(char *hay, const char *needle)
 	return NULL;
 }
 
-/* One HTTP request: headers up to the blank line, then Content-Length bytes of SOAP. */
+/* One HTTP request: headers up to the blank line, then Content-Length bytes of SOAP. Within a few seconds
+   in all: requests are served one at a time, so a client that trickles bytes would hold up the rest. */
 static void http_client(int fd)
 {
 	char buf[16384];
 	size_t got = 0;
 	char *body = NULL;
 	long want = -1;
-	struct timeval tv = {5, 0};
+	struct timeval tv = {1, 0};
+	const time_t deadline = time(NULL) + 3;
 
 	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 	while (got < sizeof(buf) - 1) {
-		ssize_t n = recv(fd, buf + got, sizeof(buf) - 1 - got, 0);
+		ssize_t n;
 
+		if (time(NULL) > deadline)
+			return;
+		n = recv(fd, buf + got, sizeof(buf) - 1 - got, 0);
+		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
+			continue;
 		if (n <= 0)
 			return;
 		got += (size_t)n;

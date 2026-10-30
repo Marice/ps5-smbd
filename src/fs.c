@@ -8,6 +8,7 @@
  * Paths come in relative to the share, with backslashes; they are joined under the share's folder after
  * every ".." and absolute part has been refused, so nothing outside /data and /mnt is reachable. */
 
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -507,6 +508,9 @@ static int open_file(struct smb2_server *srvr, struct smb2_context *smb2, struct
 	(void)srvr;
 	if (!c)
 		return reply(smb2, SMB2_CREATE, SMB2_STATUS_INSUFFICIENT_RESOURCES);
+	/* until this create succeeds, related requests after it in a compound have no file (they fail with
+	   FILE_CLOSED) rather than an earlier create's, which a CLOSE would then close */
+	c->have_last_created = 0;
 	share = request_share(c, smb2);
 	if (share == TREE_IPC)
 		return open_pipe(c, smb2, req, rep);
@@ -797,6 +801,13 @@ static int cancel(struct smb2_server *srvr, struct smb2_context *smb2)
 		smbd_log("cancel of %s %llu: %s", by_async ? "async id" : "message",
 		         (unsigned long long)(by_async ? smb2->hdr.async.async_id : smb2->hdr.message_id),
 		         found ? "notify ended" : "nothing pending by that id");
+	/* libsmb2 keeps every request until its reply, and a cancel gets none: without this each one stayed
+	   on the wait queue until the client went. Nothing reads the current request after this handler
+	   (libsmb2 moves on to the next one). */
+	if (smb2->pdu && smb2->pdu->header.command == SMB2_CANCEL) {
+		smb2_free_pdu(smb2, smb2->pdu);
+		smb2->pdu = NULL;
+	}
 	return 1;
 }
 
@@ -870,49 +881,82 @@ static int ioctl_file(struct smb2_server *srvr, struct smb2_context *smb2, struc
 
 /* ---- directories ---------------------------------------------------------------------------------------- */
 
-/* Windows' wildcards: * and ?, and the DOS ones < > " (MS-FSA 2.1.4.4), case-insensitive. */
+/* Windows' wildcards: * and ?, and the DOS ones < > " (MS-FSA 2.1.4.4), case-insensitive (ASCII).
+   Iterative, backtracking only to the last star: a pattern of many stars against a long name would take
+   exponential time recursively, and the client chooses both. */
+static int same_char(char p, char n)
+{
+	return p == n || (isalpha((unsigned char)p) && tolower((unsigned char)p) == tolower((unsigned char)n));
+}
+
 static int match(const char *pat, const char *name)
 {
-	for (; *pat; pat++, name++) {
+	const char *star = NULL, *resume = NULL;
+
+	while (*name) {
 		char p = *pat;
 
 		if (p == '*' || p == '<') {
-			while (pat[1] == '*' || pat[1] == '<')
-				pat++;
-			if (!pat[1])
-				return 1;
-			for (; *name; name++) {
-				if (match(pat + 1, name))
-					return 1;
-			}
-			return match(pat + 1, name);
-		}
-		if (!*name)
-			return (p == '>' || p == '"') && match(pat + 1, name);
-		if (p == '?' || p == '>')
-			continue;
-		if (p == '"') {
-			if (*name != '.')
-				return 0;
+			star = ++pat;
+			resume = name;
 			continue;
 		}
-		if ((*name | 0x20) != (p | 0x20) && *name != p)
+		if (p && (p == '?' || p == '>' || (p == '"' && *name == '.') || same_char(p, *name))) {
+			pat++;
+			name++;
+			continue;
+		}
+		if (!star)
 			return 0;
+		pat = star;
+		name = ++resume;
 	}
-	return !*name;
+	/* at the end of the name, stars match nothing and > and " match the end */
+	while (*pat == '*' || *pat == '<' || *pat == '>' || *pat == '"')
+		pat++;
+	return !*pat;
 }
 
 #define PAD8(n) (((n) + 7) & ~(size_t)7)
 #define ENTRY_STRIDE PAD8(sizeof(struct smb2_fileidbothdirectoryinformation))
 
-/* How much room an entry takes on the wire: the fixed part and the name in UTF-16, padded. */
+/* How much room an entry takes on the wire: the fixed part and the name in UTF-16, padded. 0 for a name
+   that is not UTF-8, which libsmb2 cannot encode (it would then send no reply at all). */
 static size_t wire_size(uint8_t info_class, const char *name)
 {
 	struct smb2_utf16 *u = smb2_utf8_to_utf16(name);
-	size_t n = u ? (size_t)u->len * 2 : strlen(name) * 2;
+	size_t n;
 
+	if (!u)
+		return 0;
+	n = (size_t)u->len * 2;
 	free(u);
 	return PAD8((info_class == SMB2_FILE_ID_FULL_DIRECTORY_INFORMATION ? 80 : 104) + n);
+}
+
+/* A handle's path as the client names it: within the share, with backslashes ("\\" for the root). A
+   byte that keeps it from being UTF-8 becomes '_', since libsmb2 could not encode the reply otherwise. */
+static void share_relative(const struct handle *h, char *out, size_t size)
+{
+	const char *root = h->share >= 0 && h->share < smbd_share_count ? smbd_shares[h->share].root : "";
+	const char *rel = strncmp(h->path, root, strlen(root)) == 0 ? h->path + strlen(root) : h->path;
+	size_t n = 0;
+	struct smb2_utf16 *u;
+
+	if (*rel != '/')
+		out[n++] = '\\';
+	for (; *rel && n + 1 < size; rel++)
+		out[n++] = *rel == '/' ? '\\' : *rel;
+	out[n] = 0;
+	u = smb2_utf8_to_utf16(out);
+	if (u) {
+		free(u);
+		return;
+	}
+	for (char *c = out; *c; c++) {
+		if ((unsigned char)*c >= 0x80)
+			*c = '_';
+	}
 }
 
 static void fill_entry(struct smb2_fileidbothdirectoryinformation *e, const struct stat *st, const char *name,
@@ -1001,6 +1045,10 @@ static int query_directory(struct smb2_server *srvr, struct smb2_context *smb2,
 		if (stat(full, &st) < 0 && lstat(full, &st) < 0)
 			continue;
 		need = wire_size(req->file_information_class, name);
+		if (!need) {
+			smbd_log("listing %s: a name that is not UTF-8 left out", h->path);
+			continue;
+		}
 		if (used + need > room) {
 			/* send it next time */
 			snprintf(h->pushback_name, sizeof(h->pushback_name), "%s", name);
@@ -1167,14 +1215,18 @@ static int query_info(struct smb2_server *srvr, struct smb2_context *smb2, struc
 			break;
 		}
 		case SMB2_FILE_ALL_INFORMATION: {
-			struct smb2_file_all_info *a = calloc(1, sizeof(*a));
+			/* the name is the path within the share, "\dir\file" (MS-FSCC 2.4.2), kept after the struct
+			   so it lives as long as the reply buffer */
+			struct smb2_file_all_info *a = calloc(1, sizeof(*a) + PATH_MAX);
 			if (a) {
-				const char *base = strrchr(h->path, '/');
+				char *name = (char *)(a + 1);
+
 				basic_of(&a->basic, &st, h->path);
 				standard_of(&a->standard, &st, h->delete_on_close);
 				a->index_number = (uint64_t)st.st_ino;
 				a->access_flags = 0x001F01FF;
-				a->name = (const uint8_t *)(base ? base + 1 : h->path);
+				share_relative(h, name, PATH_MAX);
+				a->name = (const uint8_t *)name;
 			}
 			out = a;
 			len = sizeof(*a);
@@ -1327,7 +1379,8 @@ static int set_info(struct smb2_server *srvr, struct smb2_context *smb2, struct 
 	len = req->buffer_length;
 	if (!h)
 		return reply(smb2, SMB2_SET_INFO, SMB2_STATUS_FILE_CLOSED);
-	if (req->info_type != SMB2_0_INFO_FILE)
+	/* a pipe has no times, size or name to change (and no share root to rename within) */
+	if (h->pipe || req->info_type != SMB2_0_INFO_FILE)
 		return reply(smb2, SMB2_SET_INFO, SMB2_STATUS_NOT_SUPPORTED);
 	switch (req->file_info_class) {
 	case SMB2_FILE_BASIC_INFORMATION: { /* creation, access, write, change times, attributes */
@@ -1425,8 +1478,10 @@ static int set_info(struct smb2_server *srvr, struct smb2_context *smb2, struct 
 		return 0;
 	}
 	default:
-		/* the rest: accepted, nothing to keep on this file system */
-		return 0;
+		/* refused, so a client falls back to a class above (Windows does for the -Ex ones); a silent
+		   success would let it think a delete or rename happened */
+		smbd_log("set info: file class %u not answered", req->file_info_class);
+		return reply(smb2, SMB2_SET_INFO, SMB2_STATUS_NOT_SUPPORTED);
 	}
 }
 

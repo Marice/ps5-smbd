@@ -184,9 +184,12 @@ static void nbns_handle(int fd, const uint8_t *q, ssize_t n, struct sockaddr_in 
 		return;
 	}
 	sendto(fd, r, at, 0, (struct sockaddr *)from, sizeof(*from));
-	if (smbd_trace)
-		smbd_log("names: NetBIOS %s for %s from %s", type == 0x21 ? "node status" : "query", name,
-		         inet_ntoa(from->sin_addr));
+	if (smbd_trace) {
+		char ip[INET_ADDRSTRLEN];
+
+		inet_ntop(AF_INET, &from->sin_addr, ip, sizeof(ip));
+		smbd_log("names: NetBIOS %s for %s from %s", type == 0x21 ? "node status" : "query", name, ip);
+	}
 }
 
 /* ---- mDNS (RFC 6762) and LLMNR (RFC 4795): DNS-shaped queries ---------------------------------------- */
@@ -274,8 +277,12 @@ static void dns_handle(int fd, int mdns, const uint8_t *q, ssize_t n, struct soc
 		inet_pton(AF_INET, "224.0.0.251", &to.sin_addr);
 	}
 	sendto(fd, r, at, 0, (struct sockaddr *)&to, sizeof(to));
-	if (smbd_trace)
-		smbd_log("names: %s answered %s for %s", mdns ? "mDNS" : "LLMNR", want, inet_ntoa(from->sin_addr));
+	if (smbd_trace) {
+		char ip[INET_ADDRSTRLEN];
+
+		inet_ntop(AF_INET, &from->sin_addr, ip, sizeof(ip));
+		smbd_log("names: %s answered %s for %s", mdns ? "mDNS" : "LLMNR", want, ip);
+	}
 }
 
 /* ---- sockets and the thread ------------------------------------------------------------------------- */

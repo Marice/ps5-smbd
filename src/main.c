@@ -30,6 +30,9 @@ const struct share smbd_shares[] = {{"data", "/data"}, {"mnt", "/mnt"}};
 #endif
 const int smbd_share_count = sizeof(smbd_shares) / sizeof(smbd_shares[0]);
 
+/* opened in main() before the other threads start, which log too */
+static FILE *g_trace_log;
+
 void smbd_log(const char *fmt, ...)
 {
 	char line[512];
@@ -42,15 +45,9 @@ void smbd_log(const char *fmt, ...)
 	printf("[ps5-smbd] %s\n", line);
 	fflush(stdout);
 	/* with tracing on, a file too: a payload started by a payload manager may not reach the kernel log */
-	if (smbd_trace) {
-		static FILE *log;
-
-		if (!log)
-			log = fopen(SMBD_TRACE_FILE, "a");
-		if (log) {
-			fprintf(log, "%ld %s\n", (long)time(NULL), line);
-			fflush(log);
-		}
+	if (smbd_trace && g_trace_log) {
+		fprintf(g_trace_log, "%ld %s\n", (long)time(NULL), line);
+		fflush(g_trace_log);
 	}
 }
 
@@ -167,6 +164,8 @@ int main(void)
 		smbd_trace = getenv("SMBD_TRACE") != NULL || f != NULL;
 		if (f)
 			fclose(f);
+		if (smbd_trace)
+			g_trace_log = fopen(SMBD_TRACE_FILE, "a");
 	}
 	pick_name();
 	if (rpc_init() < 0)
