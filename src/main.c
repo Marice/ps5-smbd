@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <time.h>
 
 #include "smbd.h"
@@ -17,6 +18,9 @@
 #endif
 #ifndef SMBD_TRACE_FILE
 #define SMBD_TRACE_FILE "/data/ps5-smbd/smbd.log"
+#endif
+#ifndef SMBD_SOCKET_BUFFER
+#define SMBD_SOCKET_BUFFER (4 << 20)
 #endif
 #ifndef SMBD_MAX_CLIENTS
 #define SMBD_MAX_CLIENTS 8
@@ -66,6 +70,23 @@ static void on_new_client(struct smb2_context *smb2, void *cb_data)
 	   every Windows since 8.1 speaks it. */
 	smb2_set_version(smb2, SMB2_VERSION_0302);
 	smb2_register_error_callback(smb2, on_error);
+	/* Larger socket buffers than the console's defaults: an upload is limited by how much the receiving
+	   side may have in flight (docs/decision-log.md D14). The kernel may grant less; the trace says. */
+	{
+		int fd = smb2_get_fd(smb2), size = SMBD_SOCKET_BUFFER;
+		socklen_t len = sizeof(size);
+
+		setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
+		setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
+		if (smbd_trace) {
+			int rcv = 0, snd = 0;
+
+			getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, &len);
+			len = sizeof(snd);
+			getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, &len);
+			smbd_log("client socket buffers: receive %d, send %d", rcv, snd);
+		}
+	}
 }
 
 #ifndef SMBD_HOST
