@@ -77,6 +77,7 @@ struct tree {
 struct notify {
 	int used;
 	uint64_t message_id;
+	uint64_t async_id; /* given with the interim reply; how the client names it in a cancel */
 	int handle;
 };
 
@@ -769,22 +770,33 @@ static int lock_file(struct smb2_server *srvr, struct smb2_context *smb2, struct
 	return 0; /* granted: byte-range locks are not enforced */
 }
 
-/* The only requests left pending are change notifies: a cancel ends them (cancel itself has no reply). */
+/* The only requests left pending are change notifies: a cancel ends the one it names (cancel itself has no
+   reply). It names it by the async id of the interim reply, or by message id when it was sent before that
+   reply arrived (MS-SMB2 3.3.5.16). Ending every pending notify instead had Explorer re-ask for them all. */
 static int cancel(struct smb2_server *srvr, struct smb2_context *smb2)
 {
 	struct conn *c = smb2_get_opaque(smb2);
+	int by_async = (smb2->hdr.flags & SMB2_FLAGS_ASYNC_COMMAND) != 0;
+	int found = 0;
 
 	(void)srvr;
 	if (!c)
 		return 1;
-	if (smbd_trace)
-		smbd_log("cancel");
 	for (int i = 0; i < MAX_NOTIFIES; i++) {
-		if (c->notifies[i].used) {
-			reply_to(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_CANCELLED, c->notifies[i].message_id);
-			c->notifies[i].used = 0;
-		}
+		struct notify *n = &c->notifies[i];
+
+		if (!n->used)
+			continue;
+		if (by_async ? n->async_id != smb2->hdr.async.async_id : n->message_id != smb2->hdr.message_id)
+			continue;
+		reply_to(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_CANCELLED, n->message_id);
+		n->used = 0;
+		found = 1;
 	}
+	if (smbd_trace || !found)
+		smbd_log("cancel of %s %llu: %s", by_async ? "async id" : "message",
+		         (unsigned long long)(by_async ? smb2->hdr.async.async_id : smb2->hdr.message_id),
+		         found ? "notify ended" : "nothing pending by that id");
 	return 1;
 }
 
@@ -1049,13 +1061,24 @@ static int change_notify(struct smb2_server *srvr, struct smb2_context *smb2, st
 	}
 	if (slot < 0)
 		return reply(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_INSUFFICIENT_RESOURCES);
-	c->notifies[slot].used = 1;
-	c->notifies[slot].message_id = smb2->message_id;
-	c->notifies[slot].handle = (int)(h - c->handles);
-	if (smbd_trace)
-		smbd_log("change notify on %s left pending (message %llu)", h->path,
-		         (unsigned long long)smb2->message_id);
-	return reply(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_PENDING);
+	{
+		struct notify *n = &c->notifies[slot];
+		struct smb2_pdu *waiting;
+
+		n->used = 1;
+		n->message_id = smb2->message_id;
+		n->async_id = 0;
+		n->handle = (int)(h - c->handles);
+		reply(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_PENDING);
+		/* libsmb2 gave the interim reply an async id and kept the request waiting, marked with it */
+		waiting = smb2_find_pdu(smb2, n->message_id);
+		if (waiting && (waiting->header.flags & SMB2_FLAGS_ASYNC_COMMAND))
+			n->async_id = waiting->header.async.async_id;
+		if (smbd_trace)
+			smbd_log("change notify on %s left pending (message %llu, async id %llu)", h->path,
+			         (unsigned long long)n->message_id, (unsigned long long)n->async_id);
+	}
+	return 1;
 }
 
 /* ---- information ---------------------------------------------------------------------------------------- */

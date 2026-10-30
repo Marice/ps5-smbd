@@ -80,6 +80,55 @@ int sceSystemServiceParamGetString(int param_id, char *buf, size_t size);
 #define SYSTEM_SERVICE_PARAM_ID_SYSTEM_NAME 6
 #endif
 
+#ifndef SMBD_HOST
+#include <fcntl.h>
+#include <ucontext.h>
+#include <unistd.h>
+
+/* A crash leaves one line in the log, whether tracing is on or not: the signal, the faulting address and the
+   instruction, as offsets from main() so `nm ps5-smbd.elf` places them, and the stack words that look like
+   return addresses into this program (the build has no frame pointers to walk). */
+int main(void);
+
+static void on_crash(int sig, siginfo_t *si, void *ctx)
+{
+	const mcontext_t *mc = &((ucontext_t *)ctx)->uc_mcontext;
+	const uintptr_t base = (uintptr_t)&main;
+	const uintptr_t *sp = (const uintptr_t *)mc->mc_rsp;
+	char line[1024];
+	int n, fd;
+
+	n = snprintf(line, sizeof(line), "%ld CRASH signal %d at %p: rip main%+ld, rsp %p; stack", (long)time(NULL),
+	             sig, si->si_addr, (long)(mc->mc_rip - base), (void *)mc->mc_rsp);
+	for (int i = 0; i < 64 && n < (int)sizeof(line) - 24; i++) {
+		long off = (long)(sp[i] - base);
+
+		if (off > -0x400000 && off < 0x400000)
+			n += snprintf(line + n, sizeof(line) - (size_t)n, " main%+ld", off);
+	}
+	n += snprintf(line + n, sizeof(line) - (size_t)n, "\n");
+	fd = open(SMBD_TRACE_FILE, O_WRONLY | O_APPEND | O_CREAT, 0666);
+	if (fd >= 0) {
+		write(fd, line, (size_t)n);
+		close(fd);
+	}
+	write(1, line, (size_t)n);
+	_exit(128 + sig);
+}
+
+static void catch_crashes(void)
+{
+	struct sigaction sa;
+	static const int sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT};
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_sigaction = on_crash;
+	sa.sa_flags = SA_SIGINFO;
+	for (size_t i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++)
+		sigaction(sigs[i], &sa, NULL);
+}
+#endif
+
 /* The name to go by: the console's own, PS5 when it can't be read. */
 static void pick_name(void)
 {
@@ -109,6 +158,7 @@ int main(void)
 
 #ifndef SMBD_HOST
 	sceKernelSetProcessName("ps5-smbd.elf");
+	catch_crashes();
 #endif
 	signal(SIGPIPE, SIG_IGN);
 	{
