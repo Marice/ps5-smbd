@@ -27,13 +27,6 @@
 #define SMBD_MAX_CLIENTS 8
 #endif
 
-#ifdef SMBD_HOST
-/* The host build shares two test folders instead (make host: SMBD_DATA / SMBD_MNT). */
-const struct share smbd_shares[] = {{"data", SMBD_DATA}, {"mnt", SMBD_MNT}};
-#else
-const struct share smbd_shares[] = {{"data", "/data"}, {"mnt", "/mnt"}};
-#endif
-const int smbd_share_count = sizeof(smbd_shares) / sizeof(smbd_shares[0]);
 
 /* opened in main() before the other threads start, which log too */
 static FILE *g_trace_log;
@@ -147,16 +140,34 @@ static void on_crash(int sig, siginfo_t *si, void *ctx)
 	_exit(128 + sig);
 }
 
+/* A stop asked by a signal leaves a line too, so a server that is gone says why (a kill -9 cannot). */
+static void on_stop(int sig)
+{
+	char line[96];
+	int n = snprintf(line, sizeof(line), "%ld stopped by signal %d\n", (long)time(NULL), sig);
+	int fd = open(SMBD_TRACE_FILE, O_WRONLY | O_APPEND | O_CREAT, 0666);
+
+	if (fd >= 0) {
+		write(fd, line, (size_t)n);
+		close(fd);
+	}
+	write(1, line, (size_t)n);
+	_exit(128 + sig);
+}
+
 static void catch_crashes(void)
 {
 	struct sigaction sa;
 	static const int sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT};
+	static const int stops[] = {SIGTERM, SIGHUP, SIGINT};
 
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_sigaction = on_crash;
 	sa.sa_flags = SA_SIGINFO;
 	for (size_t i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++)
 		sigaction(sigs[i], &sa, NULL);
+	for (size_t i = 0; i < sizeof(stops) / sizeof(stops[0]); i++)
+		signal(stops[i], on_stop);
 }
 #endif
 
@@ -218,9 +229,19 @@ int main(void)
 	for (int i = 0; i < 16; i++)
 		server.guid[i] = (uint8_t)(time(NULL) >> (i % 4 * 8)) ^ (uint8_t)(i * 37);
 
-	smbd_log("starting on port %d: \\\\%s\\%s and \\%s, login %s", SMBD_PORT, smbd_name, smbd_shares[0].name,
-	         smbd_shares[1].name, SMBD_USER);
+	shares_refresh();
+	smbd_log("starting on port %d: \\\\%s\\%s and \\%s (and its drives), login %s", SMBD_PORT, smbd_name,
+	         smbd_shares[0].name, smbd_shares[1].name, SMBD_USER);
 	err = smb2_serve_port(&server, SMBD_MAX_CLIENTS, on_new_client, NULL);
 	smbd_log("stopped (%d): is another SMB server already on port %d?", err, SMBD_PORT);
+	{
+		/* in the file whether tracing is on or not: the server is gone, and this says why */
+		FILE *f = fopen(SMBD_TRACE_FILE, "a");
+
+		if (f) {
+			fprintf(f, "%ld stopped: the server loop returned %d\n", (long)time(NULL), err);
+			fclose(f);
+		}
+	}
 	return err ? 1 : 0;
 }

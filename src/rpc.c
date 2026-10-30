@@ -21,18 +21,29 @@
 #define NERR_NET_NAME_NOT_FOUND 2310u
 
 static struct dcerpc_server *g_srv;
-static char g_remarks[8][64];
+static char g_remarks[SMBD_MAX_SHARES][96];
+static int g_listed[SMBD_MAX_SHARES]; /* indexes of the shares there now, set by share_count() */
+static int g_listed_count;
 
+/* The shares to list: data, mnt and the drives mounted now; and IPC$. Call before share_at(). */
 static int share_count(void)
 {
-	return smbd_share_count + 1; /* and IPC$ */
+	shares_refresh();
+	g_listed_count = 0;
+	for (int i = 0; i < smbd_share_count; i++) {
+		if (share_available(i))
+			g_listed[g_listed_count++] = i;
+	}
+	return g_listed_count + 1; /* and IPC$ */
 }
 
 static void share_at(int i, const char **name, uint32_t *type, const char **remark)
 {
-	if (i < smbd_share_count) {
-		snprintf(g_remarks[i], sizeof(g_remarks[i]), "%s %s", smbd_name, smbd_shares[i].root);
-		*name = smbd_shares[i].name;
+	if (i < g_listed_count) {
+		const struct share *s = &smbd_shares[g_listed[i]];
+
+		snprintf(g_remarks[i], sizeof(g_remarks[i]), "%s %s", smbd_name, s->root);
+		*name = s->name;
 		*type = STYPE_DISKTREE;
 		*remark = g_remarks[i];
 	} else {
@@ -103,7 +114,9 @@ static int share_get_info(struct dcerpc_context *dce, struct dcerpc_pdu *pdu, vo
 
 	(void)dce;
 	(void)pdu;
-	for (int i = 0; i < share_count(); i++) {
+	int n = share_count();
+
+	for (int i = 0; i < n; i++) {
 		uint32_t type;
 		const char *name, *remark;
 

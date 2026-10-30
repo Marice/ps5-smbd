@@ -25,6 +25,12 @@ saves, payload settings, passwords other apps keep there.
 
    Log in as `ps5` / `ps5`.
 
+Each drive the console mounts under `/mnt` (the extended storage `ext0`/`ext1`, a USB drive in `usb0` to `usb7`)
+is also a share of its own, next to `data` and `mnt`: `\\<console>\ext1`. Copy to a drive through its own share:
+Windows asks a share's root for the free space, and under `\\<console>\mnt\ext1` that root is `/mnt`, not the
+drive, so a copy there can be refused for want of room. A USB drive plugged in later shows up at the next
+connection.
+
 The console answers its name over NetBIOS (UDP 137), LLMNR (UDP 5355) and mDNS (`<name>.local`, UDP 5353),
 and announces itself over WS-Discovery (UDP 3702, metadata on TCP 5357). A port that is taken is skipped with
 a line in the log; SMB on port 445 runs regardless.
@@ -35,7 +41,8 @@ Up to SMB 3.0.2, signed (Windows 11 requires signing and refuses guest logons, h
 
 - The payload's output goes to the kernel log (klogsrv shows it).
 - A crash leaves one line in `/data/ps5-smbd/smbd.log`: `CRASH signal N at ...: rip main+OFFSET`. Look the
-  offset up with `nm` on the same build.
+  offset up with `nm` on the same build. A stop by a signal (`stopped by signal N`) or a server loop that
+  returns leaves a line too; a kill -9 cannot.
 - For a full trace of every request, create the file `/data/ps5-smbd/trace` and restart the payload; the
   trace goes to `/data/ps5-smbd/smbd.log`. Remove the file again afterwards: the trace writes a line for
   every request to the SSD.
@@ -55,7 +62,7 @@ remove `.deps/ps5/lib/libsmb2.a` (or `.deps/host/...`) first.
 The tests in `tests/` are libsmb2 clients run against `make host`:
 
 - `client.c`: write, read, rename, list, delete;
-- `shares.c`: the share list;
+- `shares.c`: the share list, and a drive under mnt as a share of its own;
 - `notify.c`: change notify and cancel;
 - `preauth.c`: raw requests out of turn: before a login (a cancel, a tree connect, a create first) they drop that client, not the server; a second session setup after a login is refused and the first session goes on;
 - `cmac.c`: the signing's AES-CMAC against RFC 4493 and the portable code, over whole messages and in pieces, and its speed;

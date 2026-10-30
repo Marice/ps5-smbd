@@ -71,7 +71,7 @@ struct handle {
 
 struct tree {
 	uint32_t id;
-	int share; /* index into smbd_shares, or TREE_IPC */
+	int share; /* index into smbd_shares (whose entries stay), or TREE_IPC */
 };
 
 /* A change notify left pending: the reply is owed when the client cancels it or closes the folder. */
@@ -380,10 +380,8 @@ static int tree_connect(struct smb2_server *srvr, struct smb2_context *smb2, str
 	name = name ? name + 1 : path;
 	if (!strcasecmp(name, "IPC$"))
 		share = TREE_IPC;
-	for (int i = 0; i < smbd_share_count; i++) {
-		if (!strcasecmp(name, smbd_shares[i].name))
-			share = i;
-	}
+	else if (share_find(name) >= 0)
+		share = share_find(name);
 	for (int i = 0; i < MAX_TREES; i++) {
 		if (!c->trees[i].id) {
 			slot = i;

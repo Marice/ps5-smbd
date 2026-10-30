@@ -11,14 +11,20 @@
 #define SMBD_USER     "ps5"
 #define SMBD_PASSWORD "ps5"
 
-/* The shares: name, folder. IPC$ is answered too (clients always ask for it), but holds nothing. */
+/* The shares (shares.c): name, folder. data and mnt come first; after them each drive under mnt that is
+   mounted, added when first seen and kept (an index stays valid), so check share_available(). IPC$ is
+   answered too (clients always ask for it), but holds nothing. */
+#define SMBD_MAX_SHARES 16
 struct share {
-	const char *name;
-	const char *root;
+	char name[16];
+	char root[256];
 };
 
-extern const struct share smbd_shares[];
-extern const int smbd_share_count;
+extern struct share smbd_shares[SMBD_MAX_SHARES];
+extern int smbd_share_count;
+void shares_refresh(void);
+int share_available(int index);
+int share_find(const char *name); /* an available share's index, or -1 */
 
 /* The request handlers, on the console's own file system (fs.c). */
 extern struct smb2_server_request_handlers smbd_handlers;
