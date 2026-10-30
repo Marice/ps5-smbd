@@ -133,6 +133,11 @@ static void second_session(const char *server)
 		return;
 	}
 	n = header(p, 0x0001, 1000);
+	{
+		uint64_t sid = 0x1234; /* not the existing session's, and not 0: the reply must carry it back */
+
+		memcpy(p + 40, &sid, 8);
+	}
 	memset(p + n, 0, 24);
 	p[n] = 25;    /* structure size */
 	p[n + 3] = 1; /* security mode: signing enabled */
@@ -153,7 +158,7 @@ static void second_session(const char *server)
 		}
 	}
 	check("a second session setup on a logged-in connection is refused", status == 0xC00000D0);
-	check("with the request's session id (0, a new session)", session == 0);
+	check("with the request's session id", session == 0x1234);
 	check("and the first session goes on", smb2_stat(smb2, "", &st) == 0);
 	smb2_disconnect_share(smb2);
 	smb2_destroy_context(smb2);

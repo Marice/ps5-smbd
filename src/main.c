@@ -3,6 +3,7 @@
  * libsmb2's server does the protocol (negotiate, NTLM, signing, the poll loop); fs.c answers the requests.
  * The host build (make host) is the same program on Linux, on another port, for the tests. */
 
+#include <errno.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -62,6 +63,34 @@ static void on_error(struct smb2_context *smb2, const char *text)
 		smbd_log("client error: %s", text);
 }
 
+/* Larger socket buffers than the console's defaults: an upload is limited by how much the receiving side may
+   have in flight (docs/decision-log.md D14, D15). FreeBSD refuses a size above its limit (ENOBUFS) rather
+   than cutting it down, so halve until one is taken. Not on the host: Linux stops growing a buffer by
+   itself once a size is set. */
+static void set_socket_buffers(int fd)
+{
+#ifdef SMBD_HOST
+	(void)fd;
+#else
+	int before = 0, size = SMBD_SOCKET_BUFFER, granted = 0, err = 0;
+	socklen_t len = sizeof(before);
+
+	getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &before, &len);
+	for (; size > before; size /= 2) {
+		if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size)) == 0) {
+			setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
+			break;
+		}
+		err = errno;
+	}
+	len = sizeof(granted);
+	getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &granted, &len);
+	if (smbd_trace)
+		smbd_log("client socket receive buffer: %d by default, %d now%s%s", before, granted,
+		         err ? ", larger refused: " : "", err ? strerror(err) : "");
+#endif
+}
+
 static void on_new_client(struct smb2_context *smb2, void *cb_data)
 {
 	(void)cb_data;
@@ -70,23 +99,7 @@ static void on_new_client(struct smb2_context *smb2, void *cb_data)
 	   every Windows since 8.1 speaks it. */
 	smb2_set_version(smb2, SMB2_VERSION_0302);
 	smb2_register_error_callback(smb2, on_error);
-	/* Larger socket buffers than the console's defaults: an upload is limited by how much the receiving
-	   side may have in flight (docs/decision-log.md D14). The kernel may grant less; the trace says. */
-	{
-		int fd = smb2_get_fd(smb2), size = SMBD_SOCKET_BUFFER;
-		socklen_t len = sizeof(size);
-
-		setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
-		setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
-		if (smbd_trace) {
-			int rcv = 0, snd = 0;
-
-			getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, &len);
-			len = sizeof(snd);
-			getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, &len);
-			smbd_log("client socket buffers: receive %d, send %d", rcv, snd);
-		}
-	}
+	set_socket_buffers(smb2_get_fd(smb2));
 }
 
 #ifndef SMBD_HOST
