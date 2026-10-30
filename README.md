@@ -55,7 +55,8 @@ The tests in `tests/` are libsmb2 clients run against `make host`:
 - `client.c`: write, read, rename, list, delete;
 - `shares.c`: the share list;
 - `notify.c`: change notify and cancel;
-- `preauth.c`: raw requests before a login (a cancel, a tree connect, a create first) drop that client, not the server;
+- `preauth.c`: raw requests out of turn: before a login (a cancel, a tree connect, a create first) they drop that client, not the server; a second session setup after a login is refused and the first session goes on;
+- `cmac.c`: the signing's AES-CMAC against RFC 4493 and the portable code, over whole messages and in pieces, and its speed;
 - `review.c`: what the code review found (pipe rename, failed compounds, wildcards, names that are not UTF-8, unknown set-info classes, FileAllInformation's name).
 
 Libsmb2 itself has to be built with `-fsanitize=address` too for ASan to see its side of a bug.

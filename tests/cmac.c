@@ -1,12 +1,20 @@
 /* A host test of libsmb2's AES-CMAC (SMB3 signing) after patches/libsmb2-signing-aesni.patch:
  * the RFC 4493 test vectors, the same MAC as the portable code (rebuilt here from libsmb2's own
- * AES128_ECB_encrypt) for messages of every length up to 4 KB and a few large ones, and its speed.
+ * AES128_ECB_encrypt) for messages of every length up to 4 KB and a few large ones, the same signature
+ * from smb2_calc_signature over a message in pieces as over the whole, and the speed.
  * Link with the host libsmb2.a. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#include <smb2/smb2.h>
+#include <smb2/libsmb2.h>
+
+#include "libsmb2-private.h"
+
+int smb2_calc_signature(struct smb2_context *smb2, uint8_t *signature, struct smb2_iovec *iov, size_t niov);
 
 void smb3_aes_cmac_128(uint8_t key[16], uint8_t *msg, uint64_t msg_len, uint8_t mac[16]);
 void AES128_ECB_encrypt(uint8_t *input, const uint8_t *key, uint8_t *output);
@@ -123,6 +131,48 @@ int main(void)
 		bad += memcmp(got, ref, 16) != 0;
 	}
 	check("the same MAC as the portable code, 4097 lengths and 3 large messages", bad == 0);
+
+	/* smb2_calc_signature over random pieces (empty ones and pieces of a few bytes included): the same
+	   as the CMAC of the whole, with the signature field zeroed as it does */
+	{
+		struct smb2_context *smb2 = smb2_init_context();
+		uint8_t *whole = malloc(300000);
+		int wrong = 0;
+
+		smb2->dialect = SMB2_VERSION_0302;
+		for (int k = 0; k < 16; k++)
+			smb2->signing_key[k] = (uint8_t)rand();
+		for (int round = 0; round < 3000; round++) {
+			size_t len = 64 + (size_t)rand() % (round < 2000 ? 200 : 299000), at = 0, niov = 0;
+			struct smb2_iovec iov[64];
+			uint8_t sig[16];
+
+			memcpy(whole, big + round, len);
+			while (at < len && niov < 63) {
+				size_t piece = niov == 0 ? 64 : (size_t)rand() % (rand() % 3 ? 40 : 70000);
+
+				if (piece > len - at)
+					piece = len - at;
+				iov[niov].buf = whole + at;
+				iov[niov].len = piece;
+				iov[niov].free = NULL;
+				niov++;
+				at += piece;
+			}
+			if (at < len) {
+				iov[niov].buf = whole + at;
+				iov[niov].len = len - at;
+				iov[niov].free = NULL;
+				niov++;
+			}
+			smb2_calc_signature(smb2, sig, iov, niov);
+			smb3_aes_cmac_128(smb2->signing_key, whole, len, ref); /* the signature field is zero now */
+			wrong += memcmp(sig, ref, 16) != 0;
+		}
+		check("smb2_calc_signature over pieces equals the CMAC of the whole, 3000 messages", wrong == 0);
+		free(whole);
+		smb2_destroy_context(smb2);
+	}
 
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	for (int r = 0; r < 16; r++)
