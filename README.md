@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/media/logo.png" width="520" alt="ps5-smbd, SMB server payload"></p>
+
 # ps5-smbd
 
 The PS5's `/data` and `/mnt` as Windows shares, from a payload: `\\<console>\data` and `\\<console>\mnt`,
