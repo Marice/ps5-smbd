@@ -158,7 +158,10 @@ static int request_share(struct conn *c, struct smb2_context *smb2)
 		if (c->trees[i].id && c->trees[i].id == id) {
 			/* a drive's share holds only while that drive does: pulled out, its folder is an empty mount
 			   point on /mnt; replaced, the folder is on another device (-3: the share is gone) */
-			if (c->trees[i].share >= 2 && share_device(c->trees[i].share) != c->trees[i].device)
+			unsigned long long now;
+
+			if (c->trees[i].share >= 2 &&
+			    (!share_device(c->trees[i].share, &now) || now != c->trees[i].device))
 				return -3;
 			return c->trees[i].share;
 		}
@@ -409,8 +412,8 @@ static int tree_connect(struct smb2_server *srvr, struct smb2_context *smb2, str
 	id = c->next_tree++;
 	c->trees[slot].id = id;
 	c->trees[slot].share = share;
-	c->trees[slot].device = share >= 2 ? share_device(share) : 0;
-	if (share >= 2 && !c->trees[slot].device) { /* the drive went while connecting */
+	c->trees[slot].device = 0;
+	if (share >= 2 && !share_device(share, &c->trees[slot].device)) { /* the drive went while connecting */
 		c->trees[slot].id = 0;
 		return reply(smb2, SMB2_TREE_CONNECT, SMB2_STATUS_BAD_NETWORK_NAME);
 	}
@@ -612,7 +615,9 @@ static int open_file(struct smb2_server *srvr, struct smb2_context *smb2, struct
 	h->used = 1;
 	h->generation = ++c->generation;
 	h->share = share;
-	h->device = share >= 2 ? share_device(share) : 0;
+	h->device = 0;
+	if (share >= 2)
+		share_device(share, &h->device); /* request_share just found it there */
 	h->delete_on_close = (req->create_options & SMB2_FILE_DELETE_ON_CLOSE) != 0;
 	snprintf(h->path, sizeof(h->path), "%s", path);
 
@@ -1483,7 +1488,9 @@ static int set_info(struct smb2_server *srvr, struct smb2_context *smb2, struct 
 			free(u);
 		}
 		/* by the handle, not the request's tree: a related compound may name no tree */
-		if (h->share >= 2 && share_device(h->share) != h->device) { /* its drive is gone or another one now */
+		unsigned long long now;
+
+		if (h->share >= 2 && (!share_device(h->share, &now) || now != h->device)) { /* drive gone or another */
 			free((void *)name);
 			return reply(smb2, SMB2_SET_INFO, SMB2_STATUS_NETWORK_NAME_DELETED);
 		}

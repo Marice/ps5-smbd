@@ -24,8 +24,8 @@ extern struct share smbd_shares[SMBD_MAX_SHARES];
 extern int smbd_share_count;
 void shares_refresh(void);
 int share_available(int index);
-/* the device a share's folder is on, 0 when the share is not there now */
-unsigned long long share_device(int index);
+/* 1 and the device a share's folder is on, or 0 when the share is not there now (a device may be 0) */
+int share_device(int index, unsigned long long *device);
 int share_find(const char *name); /* an available share's index, or -1 */
 
 /* The request handlers, on the console's own file system (fs.c). */

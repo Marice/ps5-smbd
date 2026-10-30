@@ -101,13 +101,14 @@ int share_available(int i)
 	return i < 2 || drive_mounted(smbd_shares[i].root);
 }
 
-unsigned long long share_device(int i)
+int share_device(int i, unsigned long long *device)
 {
 	struct stat st;
 
 	if (!share_available(i) || stat(smbd_shares[i].root, &st) < 0)
 		return 0;
-	return (unsigned long long)st.st_dev;
+	*device = (unsigned long long)st.st_dev;
+	return 1;
 }
 
 int share_find(const char *name)
