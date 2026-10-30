@@ -3,6 +3,8 @@
 The PS5's `/data` and `/mnt` as Windows shares, from a payload: `\\<console>\data` and `\\<console>\mnt`,
 user `ps5`, password `ps5`, read and write.
 
+<img src="docs/media/explorer.png" width="523" alt="The console as PS5-832 in Explorer's Network view, its data share open on /data/homebrew">
+
 Built on [libsmb2](https://github.com/sahlberg/libsmb2)'s SMB2/3 server, pinned to one commit of master and
 patched (`patches/`), with the file system behind it in `src/fs.c`.
 
