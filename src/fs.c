@@ -54,6 +54,7 @@ struct handle {
 	int used;
 	uint32_t generation;
 	int share;
+	unsigned long long device; /* a drive share's device at open (see struct tree), 0 for data and mnt */
 	int is_dir;
 	int fd;
 	void *pipe; /* a named pipe on IPC$ (rpc.c) instead of a file */
@@ -409,6 +410,10 @@ static int tree_connect(struct smb2_server *srvr, struct smb2_context *smb2, str
 	c->trees[slot].id = id;
 	c->trees[slot].share = share;
 	c->trees[slot].device = share >= 2 ? share_device(share) : 0;
+	if (share >= 2 && !c->trees[slot].device) { /* the drive went while connecting */
+		c->trees[slot].id = 0;
+		return reply(smb2, SMB2_TREE_CONNECT, SMB2_STATUS_BAD_NETWORK_NAME);
+	}
 	rep->share_type = share == TREE_IPC ? SMB2_SHARE_TYPE_PIPE : SMB2_SHARE_TYPE_DISK;
 	rep->share_flags = 0;
 	rep->capabilities = 0;
@@ -607,6 +612,7 @@ static int open_file(struct smb2_server *srvr, struct smb2_context *smb2, struct
 	h->used = 1;
 	h->generation = ++c->generation;
 	h->share = share;
+	h->device = share >= 2 ? share_device(share) : 0;
 	h->delete_on_close = (req->create_options & SMB2_FILE_DELETE_ON_CLOSE) != 0;
 	snprintf(h->path, sizeof(h->path), "%s", path);
 
@@ -1476,7 +1482,8 @@ static int set_info(struct smb2_server *srvr, struct smb2_context *smb2, struct 
 			name = smb2_utf16_to_utf8(u, name_len / 2);
 			free(u);
 		}
-		if (request_share(c, smb2) < 0) { /* its drive is gone or another one now */
+		/* by the handle, not the request's tree: a related compound may name no tree */
+		if (h->share >= 2 && share_device(h->share) != h->device) { /* its drive is gone or another one now */
 			free((void *)name);
 			return reply(smb2, SMB2_SET_INFO, SMB2_STATUS_NETWORK_NAME_DELETED);
 		}
