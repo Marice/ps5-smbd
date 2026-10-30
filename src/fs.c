@@ -71,7 +71,8 @@ struct handle {
 
 struct tree {
 	uint32_t id;
-	int share; /* index into smbd_shares (whose entries stay), or TREE_IPC */
+	int share;                /* index into smbd_shares (whose entries stay), or TREE_IPC */
+	unsigned long long device; /* a drive's at connect: another stick in the same folder is another share */
 };
 
 /* A change notify left pending: the reply is owed when the client cancels it or closes the folder. */
@@ -154,9 +155,9 @@ static int request_share(struct conn *c, struct smb2_context *smb2)
 
 	for (int i = 0; i < MAX_TREES; i++) {
 		if (c->trees[i].id && c->trees[i].id == id) {
-			/* a drive's share holds only while the drive does: pulled out, its folder is an empty mount
-			   point on /mnt; replaced, it is another drive (-3: the share is gone) */
-			if (c->trees[i].share >= 0 && !share_available(c->trees[i].share))
+			/* a drive's share holds only while that drive does: pulled out, its folder is an empty mount
+			   point on /mnt; replaced, the folder is on another device (-3: the share is gone) */
+			if (c->trees[i].share >= 2 && share_device(c->trees[i].share) != c->trees[i].device)
 				return -3;
 			return c->trees[i].share;
 		}
@@ -407,6 +408,7 @@ static int tree_connect(struct smb2_server *srvr, struct smb2_context *smb2, str
 	id = c->next_tree++;
 	c->trees[slot].id = id;
 	c->trees[slot].share = share;
+	c->trees[slot].device = share >= 2 ? share_device(share) : 0;
 	rep->share_type = share == TREE_IPC ? SMB2_SHARE_TYPE_PIPE : SMB2_SHARE_TYPE_DISK;
 	rep->share_flags = 0;
 	rep->capabilities = 0;
@@ -1474,7 +1476,7 @@ static int set_info(struct smb2_server *srvr, struct smb2_context *smb2, struct 
 			name = smb2_utf16_to_utf8(u, name_len / 2);
 			free(u);
 		}
-		if (!share_available(h->share)) {
+		if (request_share(c, smb2) < 0) { /* its drive is gone or another one now */
 			free((void *)name);
 			return reply(smb2, SMB2_SET_INFO, SMB2_STATUS_NETWORK_NAME_DELETED);
 		}
