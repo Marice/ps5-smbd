@@ -1,0 +1,49 @@
+Server: a create or query-directory handler that queues its own reply (an error) frees the request with
+its pdu; libsmb2 then read req->name from the freed request and freed what it found there. Take the
+name before the handler runs and free it in every case (it leaked when the handler replied itself).
+
+--- a/lib/libsmb2.c	2026-10-30 19:01:39.283024767 +0100
++++ b/lib/libsmb2.c	2026-10-30 19:01:39.315027322 +0100
+@@ -4429,6 +4429,8 @@
+         struct smb2_create_reply rep;
+         struct smb2_error_reply err;
+         struct smb2_pdu *pdu = NULL;
++        /* taken now: a handler that queues its own reply frees req with its pdu */
++        const char *name = req ? req->name : NULL;
+         int ret = -1;
+ 
+         memset(&rep, 0, sizeof(rep));
+@@ -4443,10 +4445,10 @@
+                 pdu = smb2_cmd_error_reply_async(smb2,
+                                 &err, SMB2_CREATE, SMB2_STATUS_NOT_IMPLEMENTED, NULL, cb_data);
+         }
++        if (name) {
++                smb2_free_data(smb2, discard_const(name));
++        }
+         if (pdu) {
+-                if (req->name) {
+-                        smb2_free_data(smb2, discard_const(req->name));
+-                }
+                 smb2_set_pdu_message_id(smb2, pdu, smb2->message_id);
+                 smb2_queue_pdu(smb2, pdu);
+         }
+@@ -4726,6 +4728,8 @@
+         struct smb2_query_directory_reply rep;
+         struct smb2_error_reply err;
+         struct smb2_pdu *pdu = NULL;
++        /* taken now: a handler that queues its own reply frees req with its pdu */
++        const char *name = req ? req->name : NULL;
+         int ret = -1;
+ 
+         memset(&rep, 0, sizeof(rep));
+@@ -4751,8 +4755,8 @@
+                         pdu = smb2_cmd_query_directory_reply_async(smb2, req, &rep, NULL, cb_data);
+                 }
+         }
+-        if (req->name) {
+-                smb2_free_data(smb2, discard_const(req->name));
++        if (name) {
++                smb2_free_data(smb2, discard_const(name));
+         }
+         if (pdu != NULL) {
+                 smb2_set_pdu_message_id(smb2, pdu, smb2->message_id);
