@@ -784,9 +784,7 @@ static int cancel(struct smb2_server *srvr, struct smb2_context *smb2)
 	int found = 0;
 
 	(void)srvr;
-	if (!c)
-		return 1;
-	for (int i = 0; i < MAX_NOTIFIES; i++) {
+	for (int i = 0; c && i < MAX_NOTIFIES; i++) {
 		struct notify *n = &c->notifies[i];
 
 		if (!n->used)
@@ -797,7 +795,7 @@ static int cancel(struct smb2_server *srvr, struct smb2_context *smb2)
 		n->used = 0;
 		found = 1;
 	}
-	if (smbd_trace || !found)
+	if (smbd_trace) /* not always: a client can send cancels as fast as it likes */
 		smbd_log("cancel of %s %llu: %s", by_async ? "async id" : "message",
 		         (unsigned long long)(by_async ? smb2->hdr.async.async_id : smb2->hdr.message_id),
 		         found ? "notify ended" : "nothing pending by that id");
@@ -984,7 +982,7 @@ static int query_directory(struct smb2_server *srvr, struct smb2_context *smb2,
 	struct handle *h = c ? find_handle(c, req->file_id) : NULL;
 	size_t room = req->output_buffer_length, used = 0;
 	int max_entries = (req->flags & SMB2_RETURN_SINGLE_ENTRY) ? 1 : 512;
-	int count = 0, first_call;
+	int count = 0, first_call, skipped = 0;
 	uint8_t *out;
 
 	(void)srvr;
@@ -1046,7 +1044,7 @@ static int query_directory(struct smb2_server *srvr, struct smb2_context *smb2,
 			continue;
 		need = wire_size(req->file_information_class, name);
 		if (!need) {
-			smbd_log("listing %s: a name that is not UTF-8 left out", h->path);
+			skipped++;
 			continue;
 		}
 		if (used + need > room) {
@@ -1065,6 +1063,9 @@ static int query_directory(struct smb2_server *srvr, struct smb2_context *smb2,
 		used += need;
 		count++;
 	}
+	if (skipped) /* once per reply, not once per name: Explorer lists a folder again and again */
+		smbd_log("listing %s: %d name%s that %s not UTF-8 left out", h->path, skipped, skipped == 1 ? "" : "s",
+		         skipped == 1 ? "is" : "are");
 	if (!count) {
 		free(out);
 		/* nothing matched at all is "no such file" (how a client checks a name exists); the end of a
@@ -1229,7 +1230,9 @@ static int query_info(struct smb2_server *srvr, struct smb2_context *smb2, struc
 				a->name = (const uint8_t *)name;
 			}
 			out = a;
-			len = sizeof(*a);
+			/* libsmb2 encodes into len + 1024 bytes: a long path in UTF-16 (at most two bytes per byte of
+			   UTF-8) needs its room counted in, or the reply fails to encode and is never sent */
+			len = sizeof(*a) + (a ? 2 * strlen((const char *)a->name) + 2 : 0);
 			break;
 		}
 		case SMB2_FILE_POSITION_INFORMATION: {

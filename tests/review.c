@@ -5,7 +5,7 @@
  *   - a pattern of many stars against a long name answers at once (it backtracked exponentially);
  *   - a name that is not UTF-8 is left out of a listing (the listing got no reply at all);
  *   - an unknown set-info class is refused (it reported success);
- *   - FileAllInformation names the path within the share.
+ *   - FileAllInformation names the path within the share, also a long one.
  * usage: review [server:port] [the data share's folder on this computer] */
 #include <fcntl.h>
 #include <poll.h>
@@ -34,7 +34,7 @@ struct result {
 	uint32_t status;
 	smb2_file_id fid;  /* create */
 	int entries;       /* query directory */
-	char name[512];    /* FileAllInformation */
+	char name[4096];   /* FileAllInformation */
 	int kind;
 };
 
@@ -338,6 +338,50 @@ static void test_set_info_and_name(struct smb2_context *smb2, const char *dir)
 	unlink(path);
 }
 
+/* FileAllInformation for a file deep in the share: the path in UTF-16 is longer than the 1 KB libsmb2
+   adds to the reply's length, so the length has to count it (the reply was never sent). */
+static void test_long_path(struct smb2_context *smb2, const char *dir)
+{
+	char local[4096], remote[4096], part[101];
+	size_t n = 0;
+	smb2_file_id fid;
+	struct result rq = {.status = STATUS_NONE};
+	struct smb2_query_info_request q;
+	struct smb2_pdu *pdu;
+
+	memset(part, 'd', 100);
+	part[100] = 0;
+	snprintf(local, sizeof(local), "%s/review", dir);
+	n = (size_t)snprintf(remote, sizeof(remote), "review");
+	for (int i = 0; i < 6; i++) {
+		strcat(local, "/");
+		strcat(local, part);
+		mkdir(local, 0755);
+		n += (size_t)snprintf(remote + n, sizeof(remote) - n, "\\%s", part);
+	}
+	strcat(local, "/deep.txt");
+	close(open(local, O_CREAT | O_WRONLY, 0644));
+	snprintf(remote + n, sizeof(remote) - n, "\\deep.txt");
+	check("a file 600+ characters deep opens", create_raw(smb2, remote, 0, fid) == 0);
+	memset(&q, 0, sizeof(q));
+	q.info_type = SMB2_0_INFO_FILE;
+	q.file_info_class = SMB2_FILE_ALL_INFORMATION;
+	q.output_buffer_length = 65535;
+	memcpy(q.file_id, fid, SMB2_FD_SIZE);
+	rq.kind = KIND_ALL;
+	pdu = smb2_cmd_query_info_async(smb2, &q, result_cb, &rq);
+	smb2_queue_pdu(smb2, pdu);
+	wait_for(smb2, &rq, NULL);
+	printf("     FileAllInformation for it: status %08x, name of %zu characters\n", rq.status, strlen(rq.name));
+	check("FileAllInformation answers for it with the whole path",
+	      rq.status == 0 && strlen(rq.name) == strlen(remote) + 1);
+	unlink(local);
+	for (int i = 0; i < 6; i++) {
+		*strrchr(local, '/') = 0;
+		rmdir(local);
+	}
+}
+
 int main(int argc, char **argv)
 {
 	const char *server = argc > 1 ? argv[1] : "127.0.0.1:4450";
@@ -353,6 +397,7 @@ int main(int argc, char **argv)
 	test_failed_compound(smb2);
 	test_listing(smb2, dir);
 	test_set_info_and_name(smb2, dir);
+	test_long_path(smb2, dir);
 	smb2_disconnect_share(smb2);
 	smb2_destroy_context(smb2);
 	rmdir(path);
