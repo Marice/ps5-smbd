@@ -153,8 +153,13 @@ static int request_share(struct conn *c, struct smb2_context *smb2)
 	uint32_t id = smb2->hdr.sync.tree_id;
 
 	for (int i = 0; i < MAX_TREES; i++) {
-		if (c->trees[i].id && c->trees[i].id == id)
+		if (c->trees[i].id && c->trees[i].id == id) {
+			/* a drive's share holds only while the drive does: pulled out, its folder is an empty mount
+			   point on /mnt; replaced, it is another drive (-3: the share is gone) */
+			if (c->trees[i].share >= 0 && !share_available(c->trees[i].share))
+				return -3;
 			return c->trees[i].share;
+		}
 	}
 	return -2;
 }
@@ -378,10 +383,14 @@ static int tree_connect(struct smb2_server *srvr, struct smb2_context *smb2, str
 		return reply(smb2, SMB2_TREE_CONNECT, SMB2_STATUS_BAD_NETWORK_NAME);
 	name = strrchr(path, '\\');
 	name = name ? name + 1 : path;
-	if (!strcasecmp(name, "IPC$"))
+	if (!strcasecmp(name, "IPC$")) {
 		share = TREE_IPC;
-	else if (share_find(name) >= 0)
-		share = share_find(name);
+	} else {
+		int found = share_find(name); /* once: a drive may go between two calls */
+
+		if (found >= 0)
+			share = found;
+	}
 	for (int i = 0; i < MAX_TREES; i++) {
 		if (!c->trees[i].id) {
 			slot = i;
@@ -1464,6 +1473,10 @@ static int set_info(struct smb2_server *srvr, struct smb2_context *smb2, struct 
 			memcpy(u, in + 20, name_len);
 			name = smb2_utf16_to_utf8(u, name_len / 2);
 			free(u);
+		}
+		if (!share_available(h->share)) {
+			free((void *)name);
+			return reply(smb2, SMB2_SET_INFO, SMB2_STATUS_NETWORK_NAME_DELETED);
 		}
 		if (!name || join_path(h->share, name, to, sizeof(to))) {
 			free((void *)name);

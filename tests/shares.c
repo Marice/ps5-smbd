@@ -133,8 +133,24 @@ int main(int argc, char **argv)
 		smb2_destroy_context(smb2);
 	}
 
+	/* a connection to ext9 that stays while the drive goes: what it creates must not land on mnt */
+	smb2 = login(server, "ext9");
 	unlink(file);
 	rmdir(ext9);
+	if (smb2) {
+		struct smb2fh *fh = smb2_open(smb2, "after.txt", O_WRONLY | O_CREAT);
+		char stray[4096];
+
+		snprintf(stray, sizeof(stray), "%s/ext9", mnt);
+		/* NETWORK_NAME_DELETED, not "path not found": the share is checked, not just the missing folder (on
+		   the console the folder stays, an empty mount point on mnt's file system) */
+		check("a connected drive that goes refuses a create, as a share that is gone",
+		      fh == NULL && (uint32_t)smb2_get_nterror(smb2) == 0xC00000C9u && stat(stray, &st) != 0);
+		if (fh)
+			smb2_close(smb2, fh);
+		smb2_disconnect_share(smb2);
+		smb2_destroy_context(smb2);
+	}
 	rmdir(extra);
 	list_shares(server);
 	check("a drive that is gone leaves the list", found_data && found_mnt && !found_ext9);
