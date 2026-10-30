@@ -1,10 +1,14 @@
-/* A host test of requests before a login, sent as raw packets: a CANCEL right after the negotiate, a tree
-   connect right after it, and a create before any negotiate. Each crashed or misread the server in
-   libsmb2 (patches/libsmb2-preauth-command-check.patch); now the client is dropped and the server goes on,
-   which a normal login afterwards shows. Run against `make host` (port 4450). */
+/* A host test of requests out of turn, sent as raw packets. Before a login: a CANCEL right after the
+   negotiate, a tree connect right after it, and a create before any negotiate; each crashed or misread the
+   server in libsmb2 (patches/libsmb2-preauth-command-check.patch), now that client is dropped and the server
+   goes on, which a normal login afterwards shows. After a login: a second SESSION_SETUP on the same
+   connection is refused and the first session goes on (patches/libsmb2-second-session-setup.patch; it was
+   parsed as a tree connect and the connection dropped). Run against `make host` (port 4450). */
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <poll.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -107,6 +111,49 @@ static int login_works(const char *server)
 	return ok;
 }
 
+/* after a login: a SESSION_SETUP (an NTLM negotiate, a new session) on the same connection */
+static void second_session(const char *server)
+{
+	struct smb2_context *smb2 = smb2_init_context();
+	uint8_t p[256], nb[4], buf[1024];
+	uint8_t ntlm[32] = {'N', 'T', 'L', 'M', 'S', 'S', 'P', 0, 1, 0, 0, 0, 0x97, 0x82, 0x08, 0xe2};
+	uint16_t off = 64 + 24, len = 32;
+	struct smb2_stat_64 st;
+	struct pollfd pf;
+	uint32_t status = 0;
+	size_t n;
+	int fd;
+
+	smb2_set_user(smb2, "ps5");
+	smb2_set_password(smb2, "ps5");
+	smb2_set_security_mode(smb2, SMB2_NEGOTIATE_SIGNING_REQUIRED);
+	if (smb2_connect_share(smb2, server, "data", "ps5") < 0) {
+		check("a login for the second-session test", 0);
+		return;
+	}
+	n = header(p, 0x0001, 1000);
+	memset(p + n, 0, 24);
+	p[n] = 25;    /* structure size */
+	p[n + 3] = 1; /* security mode: signing enabled */
+	memcpy(p + n + 12, &off, 2);
+	memcpy(p + n + 14, &len, 2);
+	memcpy(p + n + 24, ntlm, sizeof(ntlm));
+	fd = smb2_get_fd(smb2); /* non-blocking: wait with poll */
+	send_packet(fd, p, n + 24 + sizeof(ntlm));
+	pf.fd = fd;
+	pf.events = POLLIN;
+	if (poll(&pf, 1, 3000) > 0 && recv(fd, nb, 4, MSG_WAITALL) == 4) {
+		size_t want = (size_t)(nb[1] << 16 | nb[2] << 8 | nb[3]);
+
+		if (want <= sizeof(buf) && poll(&pf, 1, 3000) > 0 && recv(fd, buf, want, MSG_WAITALL) == (ssize_t)want)
+			memcpy(&status, buf + 8, 4);
+	}
+	check("a second session setup on a logged-in connection is refused", status == 0xC00000D0);
+	check("and the first session goes on", smb2_stat(smb2, "", &st) == 0);
+	smb2_disconnect_share(smb2);
+	smb2_destroy_context(smb2);
+}
+
 int main(int argc, char **argv)
 {
 	const char *server = argc > 1 ? argv[1] : "127.0.0.1:4450";
@@ -116,6 +163,7 @@ int main(int argc, char **argv)
 	int fd;
 
 	setvbuf(stdout, NULL, _IONBF, 0);
+	signal(SIGPIPE, SIG_IGN); /* a dropped connection must fail a check, not end the test */
 
 	/* NEGOTIATE, then CANCEL (no payload) where the session setup is expected */
 	fd = connect_raw(port);
@@ -152,6 +200,8 @@ int main(int argc, char **argv)
 	check("a create before the negotiate drops that client", closed_by_server(fd));
 	close(fd);
 	check("and the server still logs others in", login_works(server));
+
+	second_session(server);
 
 	printf("%s\n", failures ? "SOME FAILED" : "all passed");
 	return failures != 0;
