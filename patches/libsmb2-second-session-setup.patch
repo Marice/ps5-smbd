@@ -17,8 +17,8 @@ connection, and running the session setup again would put the connection back in
                          }
                          pdu->header.credit_charge = smb2->hdr.credit_charge;
 --- a/lib/libsmb2.c	2026-10-30 20:25:52.679556549 +0100
-+++ b/lib/libsmb2.c	2026-10-30 20:25:52.711561282 +0100
-@@ -4877,11 +4877,23 @@
++++ b/lib/libsmb2.c	2026-10-30 20:43:57.259921662 +0100
+@@ -4877,11 +4877,27 @@
          }
  
          switch (smb2->pdu->header.command) {
@@ -38,6 +38,10 @@ connection, and running the session setup again would put the connection back in
 +                pdu = smb2_cmd_error_reply_async(smb2, &err, SMB2_SESSION_SETUP,
 +                                                 SMB2_STATUS_REQUEST_NOT_ACCEPTED, NULL, cb_data);
 +                if (pdu != NULL) {
++                        /* the request's session id (0 for a new session), not the existing
++                         * session's: a client finds the reply's session by it, and an error
++                         * reply to a session setup is not signed */
++                        pdu->header.session_id = smb2->hdr.session_id;
 +                        smb2_set_pdu_message_id(smb2, pdu, smb2->message_id);
 +                        smb2_queue_pdu(smb2, pdu);
 +                }

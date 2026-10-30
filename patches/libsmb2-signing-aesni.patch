@@ -6,8 +6,8 @@ smb2_calc_signature runs it over the message's iovecs directly instead of alloca
 message for every signature.
 
 --- a/lib/smb2-signing.c	2026-10-30 20:10:21.465298656 +0100
-+++ b/lib/smb2-signing.c	2026-10-30 20:29:25.052200190 +0100
-@@ -123,12 +123,202 @@
++++ b/lib/smb2-signing.c	2026-10-30 20:43:57.263921891 +0100
+@@ -123,12 +123,204 @@
          }
  }
  
@@ -134,7 +134,9 @@ message for every signature.
 +                if (take > want) {
 +                        take = want;
 +                }
-+                memcpy(out, iov[*v].buf + *at, take);
++                if (take > 0) { /* an empty iovec may have no buffer */
++                        memcpy(out, iov[*v].buf + *at, take);
++                }
 +                out += take;
 +                want -= take;
 +                *at += take;
@@ -210,7 +212,7 @@ message for every signature.
          uint8_t sub_key1[AES128_KEY_LEN] = {0};
          uint8_t sub_key2[AES128_KEY_LEN] = {0};
          uint8_t scratch[AES128_KEY_LEN] = {0};
-@@ -184,6 +374,13 @@
+@@ -184,6 +376,13 @@
                  for (i=0; i < niov; i++) {
                          len += iov[i].len;
                  }

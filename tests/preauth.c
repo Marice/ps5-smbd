@@ -121,6 +121,7 @@ static void second_session(const char *server)
 	struct smb2_stat_64 st;
 	struct pollfd pf;
 	uint32_t status = 0;
+	uint64_t session = 1;
 	size_t n;
 	int fd;
 
@@ -146,9 +147,13 @@ static void second_session(const char *server)
 		size_t want = (size_t)(nb[1] << 16 | nb[2] << 8 | nb[3]);
 
 		if (want <= sizeof(buf) && poll(&pf, 1, 3000) > 0 && recv(fd, buf, want, MSG_WAITALL) == (ssize_t)want)
+		{
 			memcpy(&status, buf + 8, 4);
+			memcpy(&session, buf + 40, 8);
+		}
 	}
 	check("a second session setup on a logged-in connection is refused", status == 0xC00000D0);
+	check("with the request's session id (0, a new session)", session == 0);
 	check("and the first session goes on", smb2_stat(smb2, "", &st) == 0);
 	smb2_disconnect_share(smb2);
 	smb2_destroy_context(smb2);
