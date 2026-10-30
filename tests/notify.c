@@ -1,5 +1,6 @@
 /* A host test of ps5-smbd's change notifies: two left pending, a cancel of one ends only that one (as
    Explorer cancels them one by one), and closing the other folder ends that one. Run against `make host`. */
+#include <fcntl.h>
 #include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
