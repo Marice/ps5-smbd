@@ -87,10 +87,10 @@ static void set_socket_buffers(int fd)
 static void on_new_client(struct smb2_context *smb2, void *cb_data)
 {
 	(void)cb_data;
-	/* Up to SMB 3.0.2: libsmb2 6.3's server encodes the SMB 3.1.1 negotiate contexts wrongly (its own
-	   client refuses the reply: "Unknown negotiate context type 0x0000"). 3.0.2 signs (AES-CMAC) and
-	   every Windows since 8.1 speaks it. */
-	smb2_set_version(smb2, SMB2_VERSION_0302);
+	/* SMB 3.0 to 3.1.1 (docs/decision-log.md D21). The libsmb2 pinned before had its 3.1.1 negotiate
+	   contexts wrong, so this stopped at 3.0.2; a client that asks for 3.1.1 only (Smb2DialectMin) could not
+	   connect. No SMB 2.x: everything since Windows 8 speaks 3.0, and 3.x is what signs with AES-CMAC. */
+	smb2_set_version(smb2, SMB2_VERSION_ANY3);
 	smb2_register_error_callback(smb2, on_error);
 	set_socket_buffers(smb2_get_fd(smb2));
 }

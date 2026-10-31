@@ -35,7 +35,46 @@ The console answers its name over NetBIOS (UDP 137), LLMNR (UDP 5355) and mDNS (
 and announces itself over WS-Discovery (UDP 3702, metadata on TCP 5357). A port that is taken is skipped with
 a line in the log; SMB on port 445 runs regardless.
 
-Up to SMB 3.0.2, signed (Windows 11 requires signing and refuses guest logons, hence the login).
+SMB 3.0 to 3.1.1, signed (Windows 11 requires signing and refuses guest logons, hence the login).
+
+## If Windows cannot connect
+
+What ps5-smbd speaks, and what it does not:
+
+| | |
+| --- | --- |
+| SMB versions | 3.0, 3.0.2 and 3.1.1. Not SMB1 or 2.x. |
+| Login | NTLM, user `ps5`, password `ps5`. No guest access, no Kerberos. |
+| Signing | Yes (AES-CMAC). |
+| Encryption | No. |
+
+Go through these in order:
+
+1. **Is the payload running?** In PowerShell: `Test-NetConnection <ps5-ip> -Port 445`. It must report `TcpTestSucceeded : True`.
+2. **Get a clearer error than Explorer's.** In a Command Prompt, run `net use * \\<ps5-ip>\data /user:ps5 ps5`. The number after "System error" tells you more than Explorer does.
+3. **Check the SMB settings of your PC.** In PowerShell:
+   ```
+   Get-SmbClientConfiguration | Select RequireEncryption, Smb2DialectMin, BlockNTLM, RequireSecuritySignature
+   ```
+   - `RequireEncryption` must be False, because ps5-smbd does not encrypt. With it on, the connection more likely hangs than shows an error. Fix: `Set-SmbClientConfiguration -RequireEncryption $false`.
+   - `BlockNTLM` must be False, because ps5-smbd logs in with NTLM. Fix: `Set-SmbClientConfiguration -BlockNTLM $false`.
+   - `Smb2DialectMin` may be up to SMB311.
+   - `RequireSecuritySignature`: leave it True, the Windows 11 default. When the PC does not require signing, ps5-smbd 0.2.0 and older answered one step of the connection (the negotiate check) unsigned. Windows refuses such an answer, seen as "Invalid signature" (2148073478); error 1208 may be the same thing. From 0.3.0 that answer is always signed.
+4. **Clear credentials Windows remembers.** Windows keeps one login per server. Run `net use \\<ps5-ip>\data /delete` (and the same for any other share of the console you have connected), and look at `cmdkey /list` for an old entry for the console's IP or name.
+5. **Still stuck? Make a trace.**
+   - Create an empty file `/data/ps5-smbd/trace` on the console.
+   - Restart the payload, try once, and look in `/data/ps5-smbd/smbd.log`.
+   - Remove the `trace` file afterwards, because the trace writes a line for every request.
+
+Errors you may see from `net use`:
+
+| Error | Meaning |
+| --- | --- |
+| 53 (network path not found) | The PC does not reach port 445 on the console. Check that the payload runs, the IP is right, and nothing in between blocks it. |
+| 86, 1326 | Wrong user or password. Use `ps5` / `ps5`. |
+| 1219 | Windows already has a connection to the console with other credentials. See step 4. |
+| 2148073478 | "Invalid signature": Windows refused part of the server's answer. See step 3. |
+| 1208 | A general "extended error". Go through step 3; if that does not help, make a trace (step 5). |
 
 ## Logs
 
