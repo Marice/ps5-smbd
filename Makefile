@@ -2,7 +2,7 @@ PS5_HOST ?= 192.168.68.112
 PS5_PORT ?= 9021
 TITLE    := ps5-smbd
 ELF      := $(TITLE).elf
-VERSION  := 0.2.0
+VERSION  := 0.3.0
 
 ifdef PS5_PAYLOAD_SDK
     include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
