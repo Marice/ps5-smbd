@@ -56,11 +56,11 @@ Go through these in order:
    ```
    Get-SmbClientConfiguration | Select RequireEncryption, Smb2DialectMin, BlockNTLM, RequireSecuritySignature
    ```
-   - `RequireEncryption` must be False, because ps5-smbd does not encrypt. Fix: `Set-SmbClientConfiguration -RequireEncryption $false`.
+   - `RequireEncryption` must be False, because ps5-smbd does not encrypt. With it on, the connection more likely hangs than shows an error. Fix: `Set-SmbClientConfiguration -RequireEncryption $false`.
    - `BlockNTLM` must be False, because ps5-smbd logs in with NTLM. Fix: `Set-SmbClientConfiguration -BlockNTLM $false`.
    - `Smb2DialectMin` may be up to SMB311.
-   - `RequireSecuritySignature`: leave it True, the Windows 11 default. ps5-smbd 0.2.0 and older answered one step of the connection unsigned when the PC did not require signing. Windows then refused it with error 1208 or "Invalid signature" (2148073478). From 0.3.0 that answer is always signed.
-4. **Clear credentials Windows remembers.** Windows keeps one login per server. Run `net use * /delete` and look at `cmdkey /list` for an old entry for the console's IP or name.
+   - `RequireSecuritySignature`: leave it True, the Windows 11 default. When the PC does not require signing, ps5-smbd 0.2.0 and older answered one step of the connection (the negotiate check) unsigned. Windows refuses such an answer, seen as "Invalid signature" (2148073478); error 1208 may be the same thing. From 0.3.0 that answer is always signed.
+4. **Clear credentials Windows remembers.** Windows keeps one login per server. Run `net use \\<ps5-ip>\data /delete` (and the same for any other share of the console you have connected), and look at `cmdkey /list` for an old entry for the console's IP or name.
 5. **Still stuck? Make a trace.**
    - Create an empty file `/data/ps5-smbd/trace` on the console.
    - Restart the payload, try once, and look in `/data/ps5-smbd/smbd.log`.
@@ -73,7 +73,8 @@ Errors you may see from `net use`:
 | 53 (network path not found) | The PC does not reach port 445 on the console. Check that the payload runs, the IP is right, and nothing in between blocks it. |
 | 86, 1326 | Wrong user or password. Use `ps5` / `ps5`. |
 | 1219 | Windows already has a connection to the console with other credentials. See step 4. |
-| 1208, 2148073478 | The connection was set up, but Windows refused part of the server's answer. See step 3. |
+| 2148073478 | "Invalid signature": Windows refused part of the server's answer. See step 3. |
+| 1208 | A general "extended error". Go through step 3; if that does not help, make a trace (step 5). |
 
 ## Logs
 
