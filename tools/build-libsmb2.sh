@@ -25,13 +25,18 @@ case "$target" in
   host)
     cmake=(cmake -DCMAKE_POSITION_INDEPENDENT_CODE=ON)
     ;;
+  ps2)
+    # in the ps2dev/ps2dev container (make ps2): the EE toolchain, no libdcerpc (no srvsvc on the PS2)
+    [[ -f "${PS2DEV:-}/share/ps2dev.cmake" ]] || { echo "no PS2 toolchain (set PS2DEV, or use the ps2dev/ps2dev image)" >&2; exit 1; }
+    cmake=(cmake "-DCMAKE_TOOLCHAIN_FILE=$PS2DEV/share/ps2dev.cmake")
+    ;;
   *)
-    echo "usage: $0 ps5|host" >&2
+    echo "usage: $0 ps5|host|ps2" >&2
     exit 2
     ;;
 esac
 
-[[ -f "$prefix/lib/libsmb2.a" && -f "$prefix/lib/libdcerpc.a" ]] && exit 0
+[[ -f "$prefix/lib/libsmb2.a" && ( "$target" == ps2 || -f "$prefix/lib/libdcerpc.a" ) ]] && exit 0
 mkdir -p "$src" "$build"
 archive="$src/libsmb2-$LIBSMB2_COMMIT.tar.gz"
 if [[ ! -f "$archive" ]]; then
@@ -54,11 +59,13 @@ done
 cmake --build "$build/out" --parallel 8 >/dev/null
 cmake --install "$build/out" >/dev/null
 
-# libdcerpc (BSD-2-Clause) from the same tree, without its libsmb2 transport: its coders and server runtime
-# for the srvsvc pipe (src/rpc.c). compat/ holds the one glibc header the PS5 lacks.
-"${cmake[@]}" -S "$build/libsmb2-$LIBSMB2_COMMIT/libdcerpc" -B "$build/dcerpc" -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=OFF -DWITH_LIBSMB2=OFF -DENABLE_UTILS=OFF \
-  -DENABLE_EXAMPLES=OFF -DCMAKE_C_FLAGS="-I$root/compat" >/dev/null
-cmake --build "$build/dcerpc" --parallel 8 >/dev/null
-cmake --install "$build/dcerpc" >/dev/null
+if [[ "$target" != ps2 ]]; then
+  # libdcerpc (BSD-2-Clause) from the same tree, without its libsmb2 transport: its coders and server runtime
+  # for the srvsvc pipe (src/rpc.c). compat/ holds the one glibc header the PS5 lacks.
+  "${cmake[@]}" -S "$build/libsmb2-$LIBSMB2_COMMIT/libdcerpc" -B "$build/dcerpc" -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=OFF -DWITH_LIBSMB2=OFF -DENABLE_UTILS=OFF \
+    -DENABLE_EXAMPLES=OFF -DCMAKE_C_FLAGS="-I$root/compat" >/dev/null
+  cmake --build "$build/dcerpc" --parallel 8 >/dev/null
+  cmake --install "$build/dcerpc" >/dev/null
+fi
 echo "libsmb2 and libdcerpc ${LIBSMB2_COMMIT:0:8} built for $target in $prefix"

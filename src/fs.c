@@ -265,6 +265,7 @@ static int join_path(int share, const char *name, char *out, size_t size)
 	char rel[PATH_MAX];
 	size_t n = 0;
 	const char *p = name ? name : "";
+	const char *root, *sep;
 
 	while (*p == '\\' || *p == '/')
 		p++;
@@ -286,7 +287,10 @@ static int join_path(int share, const char *name, char *out, size_t size)
 			break;
 		part = end + 1;
 	}
-	if ((size_t)snprintf(out, size, "%s%s%s", smbd_shares[share].root, rel[0] ? "/" : "", rel) >= size)
+	root = smbd_shares[share].root;
+	/* a root that ends in a separator already ("mc0:/" on the PS2) */
+	sep = rel[0] && root[0] && root[strlen(root) - 1] != '/' ? "/" : "";
+	if ((size_t)snprintf(out, size, "%s%s%s", root, sep, rel) >= size)
 		return -1;
 	return 0;
 }
@@ -310,6 +314,12 @@ static struct smb2_timeval tv_of(time_t sec, long nsec)
 #define ATIME(st) (st)->st_atim
 #define CTIME(st) (st)->st_ctim
 #define BTIME(st) (st)->st_birthtim
+#elif defined(_EE)
+/* the PS2's C library has whole seconds only */
+#define MTIME(st) ((struct timespec){ (st)->st_mtime, 0 })
+#define ATIME(st) ((struct timespec){ (st)->st_atime, 0 })
+#define CTIME(st) ((struct timespec){ (st)->st_ctime, 0 })
+#define BTIME(st) ((struct timespec){ (st)->st_mtime, 0 })
 #else
 #define MTIME(st) (st)->st_mtim
 #define ATIME(st) (st)->st_atim

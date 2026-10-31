@@ -17,6 +17,10 @@
 
 #include "smbd.h"
 
+#if defined(_EE)
+/* The PS2: each memory card a share named after its device, and no drives to look for */
+struct share smbd_shares[SMBD_MAX_SHARES] = {{"mc0", "mc0:/"}, {"mc1", "mc1:/"}};
+#else
 #ifdef SMBD_HOST
 #define DATA_ROOT SMBD_DATA
 #define MNT_ROOT SMBD_MNT
@@ -26,6 +30,7 @@
 #endif
 
 struct share smbd_shares[SMBD_MAX_SHARES] = {{"data", DATA_ROOT}, {"mnt", MNT_ROOT}};
+#endif
 int smbd_share_count = 2;
 
 /* "ext" or "usb" and a number: the drives the console mounts under /mnt (not its own mounts there, such as
@@ -50,6 +55,10 @@ static int is_drive_name(const char *name)
    in usb3) is part of mnt's. The host build has no such mounts and takes the folder alone. */
 static int drive_mounted(const char *root)
 {
+#ifdef _EE
+	(void)root;
+	return 1; /* only the memory cards, whose shares are always there */
+#endif
 	struct stat st;
 #ifndef SMBD_HOST
 	struct stat parent;
@@ -68,6 +77,7 @@ static int drive_mounted(const char *root)
 
 void shares_refresh(void)
 {
+#ifndef _EE
 	DIR *d = opendir(MNT_ROOT);
 	struct dirent *e;
 
@@ -92,6 +102,7 @@ void shares_refresh(void)
 		smbd_share_count++;
 	}
 	closedir(d);
+#endif
 }
 
 int share_available(int i)

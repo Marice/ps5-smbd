@@ -176,7 +176,9 @@ static void pick_name(void)
 {
 	char name[128] = "";
 
-#ifdef SMBD_HOST
+#if defined(_EE)
+	snprintf(name, sizeof(name), "PS2");
+#elif defined(SMBD_HOST)
 	snprintf(name, sizeof(name), "%s", getenv("SMBD_NAME") ? getenv("SMBD_NAME") : "PS5-HOST");
 #else
 	if (sceSystemServiceParamGetString(SYSTEM_SERVICE_PARAM_ID_SYSTEM_NAME, name, sizeof(name)) != 0)
@@ -198,6 +200,12 @@ int main(void)
 	static struct smb2_server server;
 	int err;
 
+#ifdef _EE
+	if (ps2_init() < 0) {
+		for (;;)
+			sleep(60); /* leave the reason on the screen */
+	}
+#endif
 #ifndef SMBD_HOST
 	sceKernelSetProcessName("ps5-smbd.elf");
 	catch_crashes();
@@ -230,7 +238,12 @@ int main(void)
 		server.guid[i] = (uint8_t)(time(NULL) >> (i % 4 * 8)) ^ (uint8_t)(i * 37);
 
 	shares_refresh();
-	smbd_log("starting on port %d: \\\\%s\\%s and \\%s (and its drives), login %s", SMBD_PORT, smbd_name,
+#ifdef _EE
+#define DRIVES "" /* the memory cards only */
+#else
+#define DRIVES " (and its drives)"
+#endif
+	smbd_log("starting on port %d: \\\\%s\\%s and \\%s" DRIVES ", login %s", SMBD_PORT, smbd_name,
 	         smbd_shares[0].name, smbd_shares[1].name, SMBD_USER);
 	err = smb2_serve_port(&server, SMBD_MAX_CLIENTS, on_new_client, NULL);
 	smbd_log("stopped (%d): is another SMB server already on port %d?", err, SMBD_PORT);

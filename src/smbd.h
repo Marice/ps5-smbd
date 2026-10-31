@@ -53,3 +53,8 @@ int rpc_pipe_write(void *pipe, const uint8_t *buf, size_t len);
 size_t rpc_pipe_read(void *pipe, uint8_t *buf, size_t max, int *more);
 
 void smbd_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
+#ifdef _EE
+/* The PS2 (ps2.c): IOP modules, memory cards and the network up; < 0 if there is no network. */
+int ps2_init(void);
+#endif
