@@ -1,9 +1,11 @@
 /* A host test of requests out of turn, sent as raw packets. Before a login: a CANCEL right after the
    negotiate, a tree connect right after it, and a create before any negotiate; each crashed or misread the
    server in libsmb2 (patches/libsmb2-preauth-command-check.patch), now that client is dropped and the server
-   goes on, which a normal login afterwards shows. After a login: a second SESSION_SETUP on the same
-   connection is refused and the first session goes on (patches/libsmb2-second-session-setup.patch; it was
-   parsed as a tree connect and the connection dropped). Run against `make host` (port 4450). */
+   goes on, which a normal login afterwards shows. After a login: a SESSION_SETUP for a session the
+   connection does not have gets USER_SESSION_DELETED and the first session goes on; one for a new session
+   (id 0) takes the place of the first, whose requests then get USER_SESSION_DELETED, even while the new
+   login is still open (libsmb2 keeps one session per connection; it used to parse a second SESSION_SETUP as
+   a tree connect and drop the connection). Run against `make host` (port 4450). */
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -111,19 +113,46 @@ static int login_works(const char *server)
 	return ok;
 }
 
-/* after a login: a SESSION_SETUP (an NTLM negotiate, a new session) on the same connection */
-static void second_session(const char *server)
+/* a SESSION_SETUP carrying an NTLM negotiate and session id sid, on a connection libsmb2 has logged in on;
+   0 and the reply's status and session id if one came back */
+static int raw_session_setup(int fd, uint64_t sid, uint64_t message_id, uint32_t *status, uint64_t *session)
 {
-	struct smb2_context *smb2 = smb2_init_context();
 	uint8_t p[256], nb[4], buf[1024];
 	uint8_t ntlm[32] = {'N', 'T', 'L', 'M', 'S', 'S', 'P', 0, 1, 0, 0, 0, 0x97, 0x82, 0x08, 0xe2};
 	uint16_t off = 64 + 24, len = 32;
-	struct smb2_stat_64 st;
 	struct pollfd pf;
+	size_t n = header(p, 0x0001, message_id);
+
+	memcpy(p + 40, &sid, 8);
+	memset(p + n, 0, 24);
+	p[n] = 25;    /* structure size */
+	p[n + 3] = 1; /* security mode: signing enabled */
+	memcpy(p + n + 12, &off, 2);
+	memcpy(p + n + 14, &len, 2);
+	memcpy(p + n + 24, ntlm, sizeof(ntlm));
+	send_packet(fd, p, n + 24 + sizeof(ntlm));
+	pf.fd = fd; /* non-blocking: wait with poll */
+	pf.events = POLLIN;
+	if (poll(&pf, 1, 3000) > 0 && recv(fd, nb, 4, MSG_WAITALL) == 4) {
+		size_t want = (size_t)(nb[1] << 16 | nb[2] << 8 | nb[3]);
+
+		if (want <= sizeof(buf) && poll(&pf, 1, 3000) > 0 && recv(fd, buf, want, MSG_WAITALL) == (ssize_t)want)
+		{
+			memcpy(status, buf + 8, 4);
+			memcpy(session, buf + 40, 8);
+			return 0;
+		}
+	}
+	return -1;
+}
+
+/* after a login: SESSION_SETUPs on the same connection, for a session it does not have, then for a new one */
+static void second_session(const char *server)
+{
+	struct smb2_context *smb2 = smb2_init_context();
+	struct smb2_stat_64 st;
 	uint32_t status = 0;
 	uint64_t session = 1;
-	size_t n;
-	int fd;
 
 	smb2_set_user(smb2, "ps5");
 	smb2_set_password(smb2, "ps5");
@@ -132,34 +161,27 @@ static void second_session(const char *server)
 		check("a login for the second-session test", 0);
 		return;
 	}
-	n = header(p, 0x0001, 1000);
-	{
-		uint64_t sid = 0x1234; /* not the existing session's, and not 0: the reply must carry it back */
-
-		memcpy(p + 40, &sid, 8);
-	}
-	memset(p + n, 0, 24);
-	p[n] = 25;    /* structure size */
-	p[n + 3] = 1; /* security mode: signing enabled */
-	memcpy(p + n + 12, &off, 2);
-	memcpy(p + n + 14, &len, 2);
-	memcpy(p + n + 24, ntlm, sizeof(ntlm));
-	fd = smb2_get_fd(smb2); /* non-blocking: wait with poll */
-	send_packet(fd, p, n + 24 + sizeof(ntlm));
-	pf.fd = fd;
-	pf.events = POLLIN;
-	if (poll(&pf, 1, 3000) > 0 && recv(fd, nb, 4, MSG_WAITALL) == 4) {
-		size_t want = (size_t)(nb[1] << 16 | nb[2] << 8 | nb[3]);
-
-		if (want <= sizeof(buf) && poll(&pf, 1, 3000) > 0 && recv(fd, buf, want, MSG_WAITALL) == (ssize_t)want)
-		{
-			memcpy(&status, buf + 8, 4);
-			memcpy(&session, buf + 40, 8);
-		}
-	}
-	check("a second session setup on a logged-in connection is refused", status == 0xC00000D0);
+	/* not the existing session's id, and not 0: libsmb2 has no such session */
+	raw_session_setup(smb2_get_fd(smb2), 0x1234, 1000, &status, &session);
+	check("a session setup for a session the connection does not have is answered USER_SESSION_DELETED",
+	      status == 0xC0000203);
 	check("with the request's session id", session == 0x1234);
 	check("and the first session goes on", smb2_stat(smb2, "", &st) == 0);
+
+	/* 0: a new session, which takes the place of the logged-in one (libsmb2 keeps one per connection) */
+	status = 0;
+	session = 0;
+	raw_session_setup(smb2_get_fd(smb2), 0, 1001, &status, &session);
+	check("a new session on a logged-in connection is set up (MORE_PROCESSING_REQUIRED)",
+	      status == 0xC0000016 && session != 0);
+	/* the old session's request, while the new one's login is still open */
+	{
+		int r = smb2_stat(smb2, "", &st);
+
+		printf("     old session: stat %d, nterror %08x, %s\n", r, (uint32_t)smb2_get_nterror(smb2), smb2_get_error(smb2));
+		check("and the old session is gone: USER_SESSION_DELETED, the connection stays",
+		      r < 0 && (uint32_t)smb2_get_nterror(smb2) == 0xC0000203);
+	}
 	smb2_disconnect_share(smb2);
 	smb2_destroy_context(smb2);
 }
