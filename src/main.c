@@ -220,6 +220,9 @@ int main(void)
 		if (smbd_trace)
 			g_trace_log = fopen(SMBD_TRACE_FILE, "a");
 	}
+#ifdef SMBD_PS2_TRACE
+	smbd_trace = 1; /* to the console only: a trace file would wear out the memory card */
+#endif
 	pick_name();
 	if (rpc_init() < 0)
 		smbd_log("srvsvc off: \\\\<console> will not list the shares");

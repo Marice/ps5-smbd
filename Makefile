@@ -42,6 +42,7 @@ PS2_SRCS := src/main.c src/fs.c src/shares.c src/ps2.c
 PS2_IRX  := build/ps2/dev9_irx.c build/ps2/netman_irx.c build/ps2/smap_irx.c build/ps2/iomanx_irx.c \
             build/ps2/filexio_irx.c build/ps2/sio2man_irx.c build/ps2/mcman_irx.c build/ps2/mcserv_irx.c
 # a fixed address instead of DHCP: make ps2 PS2_IP=192.168.1.50 PS2_GW=192.168.1.1 [PS2_NETMASK=255.255.255.0]
+# PS2_CFLAGS=-DSMBD_PS2_TRACE traces every request to the console, -DSMBD_PS2_SELFTEST tests the card paths
 PS2_NETMASK ?= 255.255.255.0
 PS2_NET  := $(if $(PS2_IP),-DSMBD_PS2_IP='"$(PS2_IP)"' -DSMBD_PS2_GW='"$(PS2_GW)"' -DSMBD_PS2_NETMASK='"$(PS2_NETMASK)"')
 
@@ -71,13 +72,13 @@ $(PS2_ELF): .deps/ps2/lib/libsmb2.a $(PS2_SRCS) $(HDRS) $(PS2_IRX)
 	mips64r5900el-ps2-elf-gcc -D_EE -G0 -O2 -Wall -std=gnu11 -DSMBD_VERSION='"$(VERSION)"' -DSMBD_HOST \
 	  -DSMBD_TRACE_FILE='"mc0:/smbd.log"' $(PS2_NET) $(PS2_CFLAGS) \
 	  -Isrc/ps2 -Isrc -I.deps/ps2/include -I$(PS2SDK)/ee/include -I$(PS2SDK)/common/include \
-	  -T$(PS2SDK)/ee/startup/linkfile -L$(PS2SDK)/ee/lib -Wl,-zmax-page-size=128 -Wl,--wrap=stat -o $@ $(PS2_SRCS) $(PS2_IRX) \
+	  -T$(PS2SDK)/ee/startup/linkfile -L$(PS2SDK)/ee/lib -Wl,-zmax-page-size=128 -Wl,--wrap=stat,--wrap=unlink,--wrap=rmdir,--wrap=rename -o $@ $(PS2_SRCS) $(PS2_IRX) \
 	  .deps/ps2/lib/libsmb2.a -lnetman -lps2ip -lmc -lfileXio -lpatches -ldebug
 
 DOCKER ?= docker
 ps2-docker:
 	$(DOCKER) run --rm -v "$(CURDIR)":/src:z -w /src ps2dev/ps2dev:latest \
-	  sh -c 'apk add -q bash cmake curl make patch && make ps2 PS2_IP=$(PS2_IP) PS2_GW=$(PS2_GW) PS2_NETMASK=$(PS2_NETMASK)'
+	  sh -c 'apk add -q bash cmake curl make patch && make ps2 PS2_IP=$(PS2_IP) PS2_GW=$(PS2_GW) PS2_NETMASK=$(PS2_NETMASK) PS2_CFLAGS="$(PS2_CFLAGS)"'
 
 deploy: $(ELF)
 	$(PS5_DEPLOY) -h $(PS5_HOST) -p $(PS5_PORT) $(ELF)

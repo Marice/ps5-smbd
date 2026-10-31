@@ -226,6 +226,40 @@ void ps2_selftest(void)
 		}
 	}
 	{
+		static const char *names[] = {"mc0:/x2.bin", "mc0:/smbtest.txt", "mc0:/ps2test.bin", "mc0:/win2016"};
+
+		for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+			int r = stat(names[i], &st);
+			int fd = open(names[i], O_RDONLY);
+			char buf[8];
+
+			printf("SELFTEST stat(%s) = %d errno %d mode %o size %ld\n", names[i], r, r ? errno : 0,
+			       r ? 0 : st.st_mode, r ? 0L : (long)st.st_size);
+			printf("SELFTEST   open(O_RDONLY) = %d errno %d", fd, fd < 0 ? errno : 0);
+			if (fd >= 0) {
+				printf(" read %d", (int)read(fd, buf, sizeof(buf)));
+				close(fd);
+			}
+			printf("\n");
+		}
+		printf("SELFTEST rename(x3.bin, r3.bin) = %d errno %d\n", rename("mc0:/x3.bin", "mc0:/r3.bin"), errno);
+		printf("SELFTEST rename(r3.bin, x3.bin) = %d errno %d\n", rename("mc0:/r3.bin", "mc0:/x3.bin"), errno);
+		/* the empty folders the C library's unlink() left of x2.bin, q.bin and p.bin */
+		printf("SELFTEST rmdir(x2.bin) = %d errno %d\n", rmdir("mc0:/x2.bin"), errno);
+		printf("SELFTEST rmdir(q.bin) = %d errno %d\n", rmdir("mc0:/q.bin"), errno);
+		printf("SELFTEST rmdir(p.bin) = %d errno %d\n", rmdir("mc0:/p.bin"), errno);
+		{
+			int fd = open("mc0:/del.bin", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+			if (fd >= 0) {
+				write(fd, "x", 1);
+				close(fd);
+			}
+		}
+		printf("SELFTEST unlink(del.bin) = %d errno %d\n", unlink("mc0:/del.bin"), errno);
+		printf("SELFTEST stat(del.bin) after = %d errno %d\n", stat("mc0:/del.bin", &st), errno);
+	}
+	{
 		int __real_stat(const char *path, struct stat *st);
 		int r = __real_stat("mc0:/nope.bin", &st);
 
@@ -261,6 +295,88 @@ void ps2_selftest(void)
 #endif
 
 /* ---- what the C library lacks --------------------------------------------------------------------------- */
+
+/* "mc0:/a/b" -> port 0 and "/a/b"; -1 for a path not on a memory card */
+static int mc_path(const char *path, const char **rest)
+{
+	if (strncmp(path, "mc", 2) != 0 || (path[2] != '0' && path[2] != '1') || path[3] != ':')
+		return -1;
+	*rest = path[4] ? path + 4 : "/";
+	return path[2] - '0';
+}
+
+static int mc_errno(int ret)
+{
+	switch (ret) {
+	case -3: return ENOSPC;
+	case -4: return ENOENT;
+	case -5: return EACCES;
+	case -6: return ENOTEMPTY;
+	default: return EIO;
+	}
+}
+
+/* On a memory card the C library's unlink() leaves an empty directory in the file's place, and rmdir()
+   and rename() are not there at all (ENOSYS): use libmc. Linked with -Wl,--wrap=unlink,--wrap=rmdir,
+   --wrap=rename. */
+static int mc_delete(const char *path)
+{
+	const char *rest;
+	int port = mc_path(path, &rest), ret;
+
+	mcDelete(port, 0, rest);
+	mcSync(0, NULL, &ret);
+	if (ret < 0) {
+		errno = mc_errno(ret);
+		return -1;
+	}
+	return 0;
+}
+
+int __real_unlink(const char *path);
+int __wrap_unlink(const char *path)
+{
+	const char *rest;
+
+	return mc_path(path, &rest) < 0 ? __real_unlink(path) : mc_delete(path);
+}
+
+int __real_rmdir(const char *path);
+int __wrap_rmdir(const char *path)
+{
+	const char *rest;
+
+	return mc_path(path, &rest) < 0 ? __real_rmdir(path) : mc_delete(path);
+}
+
+/* the card renames within a folder only: the new name has no path */
+int __real_rename(const char *from, const char *to);
+int __wrap_rename(const char *from, const char *to)
+{
+	const char *rest_from, *rest_to, *slash_from, *slash_to;
+	int port = mc_path(from, &rest_from), ret;
+
+	if (port < 0)
+		return __real_rename(from, to);
+	if (mc_path(to, &rest_to) != port) {
+		errno = EXDEV;
+		return -1;
+	}
+	slash_from = strrchr(rest_from, '/');
+	slash_to = strrchr(rest_to, '/');
+	if (!slash_from || !slash_to || slash_from - rest_from != slash_to - rest_to ||
+	    strncmp(rest_from, rest_to, (size_t)(slash_from - rest_from)) != 0) {
+		errno = EXDEV;
+		return -1;
+	}
+	mcRename(port, 0, rest_from, slash_to + 1);
+	mcSync(0, NULL, &ret);
+	if (ret < 0) {
+		errno = mc_errno(ret);
+		return -1;
+	}
+	return 0;
+}
 
 /* On a memory card, stat() of a file that does not exist succeeds (st_mode without a file type); the
    server would then open a missing file without O_CREAT. Linked with -Wl,--wrap=stat. */
