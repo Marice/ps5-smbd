@@ -7,8 +7,8 @@
 # server and decoder fixes (docs/decision-log.md D2).
 set -euo pipefail
 
-LIBSMB2_COMMIT=727feaaa6d0f4fed1bae57745fbc2c5db9a30e64  # master, 2026-10-25
-LIBSMB2_SHA256=ebb5118d338e452b5e8896f0dab4783babe6a368b0c892f1c1a34cf5fdc5f3f7
+LIBSMB2_COMMIT=565460de50d97c451d2692d9fab48314b47e453a  # master, 2026-10-31
+LIBSMB2_SHA256=f439041a248539e0c99e6581cdcf740c773700b4b25180f5862b5dba96147d30
 
 target="${1:-}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -49,6 +49,7 @@ for patch in "$root"/patches/libsmb2-*.patch; do
 done
 "${cmake[@]}" -S "$build/libsmb2-$LIBSMB2_COMMIT" -B "$build/out" -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$prefix" -DBUILD_SHARED_LIBS=OFF -DENABLE_LIBKRB5=OFF -DENABLE_GSSAPI=OFF \
+  -DENABLE_LIBQUIC=OFF -DENABLE_RDMA=OFF -DENABLE_LIBDCERPC=OFF \
   -DENABLE_EXAMPLES=OFF >/dev/null
 cmake --build "$build/out" --parallel 8 >/dev/null
 cmake --install "$build/out" >/dev/null
@@ -56,7 +57,7 @@ cmake --install "$build/out" >/dev/null
 # libdcerpc (BSD-2-Clause) from the same tree, without its libsmb2 transport: its coders and server runtime
 # for the srvsvc pipe (src/rpc.c). compat/ holds the one glibc header the PS5 lacks.
 "${cmake[@]}" -S "$build/libsmb2-$LIBSMB2_COMMIT/libdcerpc" -B "$build/dcerpc" -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX="$prefix" -DBUILD_SHARED_LIBS=OFF -DWITH_LIBSMB2=OFF -DENABLE_UTILS=OFF \
+  -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=OFF -DWITH_LIBSMB2=OFF -DENABLE_UTILS=OFF \
   -DENABLE_EXAMPLES=OFF -DCMAKE_C_FLAGS="-I$root/compat" >/dev/null
 cmake --build "$build/dcerpc" --parallel 8 >/dev/null
 cmake --install "$build/dcerpc" >/dev/null

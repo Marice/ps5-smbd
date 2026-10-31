@@ -25,9 +25,6 @@
 
 #include "smbd.h"
 
-/* The request header's tree id: libsmb2 6.3 has no public call for it on the server side. The library is
-   built from this exact pinned version (tools/build-libsmb2.sh), so its private header matches. */
-#include "libsmb2-private.h"
 
 /* every request in the kernel log: SMBD_TRACE in the environment, or a file named trace next to /data/ps5-smbd */
 int smbd_trace;
@@ -152,7 +149,7 @@ static int destruction(struct smb2_server *srvr, struct smb2_context *smb2)
 
 static int request_share(struct conn *c, struct smb2_context *smb2)
 {
-	uint32_t id = smb2->hdr.sync.tree_id;
+	uint32_t id = smb2_get_last_request_tree_id(smb2);
 
 	for (int i = 0; i < MAX_TREES; i++) {
 		if (c->trees[i].id && c->trees[i].id == id) {
@@ -232,7 +229,7 @@ static int reply(struct smb2_context *smb2, uint8_t command, uint32_t status)
 	pdu = smb2_cmd_error_reply_async(smb2, &err, command, (int)status, NULL, NULL);
 	if (pdu) {
 		/* a reply carries its request's message id (libsmb2 does the same for its own replies) */
-		smb2_set_pdu_message_id(smb2, pdu, smb2->message_id);
+		smb2_set_pdu_message_id(smb2, pdu, smb2_get_last_request_message_id(smb2));
 		smb2_queue_pdu(smb2, pdu);
 	}
 	return 1;
@@ -424,7 +421,7 @@ static int tree_connect(struct smb2_server *srvr, struct smb2_context *smb2, str
 	pdu = smb2_cmd_tree_connect_reply_async(smb2, rep, id, NULL, NULL);
 	if (!pdu)
 		return reply(smb2, SMB2_TREE_CONNECT, SMB2_STATUS_INSUFFICIENT_RESOURCES);
-	smb2_set_pdu_message_id(smb2, pdu, smb2->message_id);
+	smb2_set_pdu_message_id(smb2, pdu, smb2_get_last_request_message_id(smb2));
 	smb2_queue_pdu(smb2, pdu);
 	smbd_log("share \"%s\" connected (tree %u)", share == TREE_IPC ? "IPC$" : smbd_shares[share].name, id);
 	return 1;
@@ -800,7 +797,9 @@ static int lock_file(struct smb2_server *srvr, struct smb2_context *smb2, struct
 static int cancel(struct smb2_server *srvr, struct smb2_context *smb2)
 {
 	struct conn *c = smb2_get_opaque(smb2);
-	int by_async = (smb2->hdr.flags & SMB2_FLAGS_ASYNC_COMMAND) != 0;
+	uint64_t async_id = smb2_get_last_request_async_id(smb2);
+	uint64_t message_id = smb2_get_last_request_message_id(smb2);
+	int by_async = async_id != 0;
 	int found = 0;
 
 	(void)srvr;
@@ -809,7 +808,7 @@ static int cancel(struct smb2_server *srvr, struct smb2_context *smb2)
 
 		if (!n->used)
 			continue;
-		if (by_async ? n->async_id != smb2->hdr.async.async_id : n->message_id != smb2->hdr.message_id)
+		if (by_async ? n->async_id != async_id : n->message_id != message_id)
 			continue;
 		reply_to(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_CANCELLED, n->message_id);
 		n->used = 0;
@@ -817,15 +816,11 @@ static int cancel(struct smb2_server *srvr, struct smb2_context *smb2)
 	}
 	if (smbd_trace) /* not always: a client can send cancels as fast as it likes */
 		smbd_log("cancel of %s %llu: %s", by_async ? "async id" : "message",
-		         (unsigned long long)(by_async ? smb2->hdr.async.async_id : smb2->hdr.message_id),
+		         (unsigned long long)(by_async ? async_id : message_id),
 		         found ? "notify ended" : "nothing pending by that id");
 	/* libsmb2 keeps every request until its reply, and a cancel gets none: without this each one stayed
 	   on the wait queue until the client went. Nothing reads the current request after this handler
 	   (libsmb2 moves on to the next one). */
-	if (smb2->pdu && smb2->pdu->header.command == SMB2_CANCEL) {
-		smb2_free_pdu(smb2, smb2->pdu);
-		smb2->pdu = NULL;
-	}
 	return 1;
 }
 
@@ -847,7 +842,7 @@ static int pipe_transceive(struct smb2_context *smb2, struct smb2_ioctl_request 
 	uint32_t max = req->max_output_response ? req->max_output_response : 4280;
 	uint8_t *out;
 	size_t got;
-	int more = 0, was;
+	int more = 0;
 	struct smb2_pdu *pdu;
 
 	if (!h || !h->pipe)
@@ -865,17 +860,14 @@ static int pipe_transceive(struct smb2_context *smb2, struct smb2_ioctl_request 
 	memcpy(rep->file_id, req->file_id, SMB2_FD_SIZE);
 	rep->output_count = (uint32_t)got;
 	rep->output = out;
-	was = smb2->passthrough;
-	smb2->passthrough = 1;
 	pdu = smb2_cmd_ioctl_reply_async(smb2, rep, NULL, NULL);
-	smb2->passthrough = was;
 	free(out);
 	if (!pdu)
 		return reply(smb2, SMB2_IOCTL, SMB2_STATUS_INTERNAL_ERROR);
 	if (smbd_trace)
 		smbd_log("pipe transceive: %u bytes in, %zu out", req->input_count, got);
 	/* queued, the request is freed: req is not looked at again */
-	smb2_set_pdu_message_id(smb2, pdu, smb2->message_id);
+	smb2_set_pdu_message_id(smb2, pdu, smb2_get_last_request_message_id(smb2));
 	smb2_queue_pdu(smb2, pdu);
 	return 1;
 }
@@ -949,7 +941,14 @@ static size_t wire_size(uint8_t info_class, const char *name)
 		return 0;
 	n = (size_t)u->len * 2;
 	free(u);
-	return PAD8((info_class == SMB2_FILE_ID_FULL_DIRECTORY_INFORMATION ? 80 : 104) + n);
+	switch (info_class) {
+	case SMB2_FILE_DIRECTORY_INFORMATION: return PAD8(64 + n);
+	case SMB2_FILE_FULL_DIRECTORY_INFORMATION: return PAD8(68 + n);
+	case SMB2_FILE_BOTH_DIRECTORY_INFORMATION: return PAD8(94 + n);
+	case SMB2_FILE_NAMES_INFORMATION: return PAD8(12 + n);
+	case SMB2_FILE_ID_FULL_DIRECTORY_INFORMATION: return PAD8(80 + n);
+	default: return PAD8(104 + n);
+	}
 }
 
 /* A handle's path as the client names it: within the share, with backslashes ("\\" for the root). A
@@ -1010,8 +1009,15 @@ static int query_directory(struct smb2_server *srvr, struct smb2_context *smb2,
 		return reply(smb2, SMB2_QUERY_DIRECTORY, SMB2_STATUS_FILE_CLOSED);
 	if (!h->is_dir)
 		return reply(smb2, SMB2_QUERY_DIRECTORY, SMB2_STATUS_INVALID_PARAMETER);
-	if (req->file_information_class != SMB2_FILE_ID_BOTH_DIRECTORY_INFORMATION &&
-	    req->file_information_class != SMB2_FILE_ID_FULL_DIRECTORY_INFORMATION) {
+	switch (req->file_information_class) {
+	case SMB2_FILE_DIRECTORY_INFORMATION:
+	case SMB2_FILE_FULL_DIRECTORY_INFORMATION:
+	case SMB2_FILE_BOTH_DIRECTORY_INFORMATION:
+	case SMB2_FILE_NAMES_INFORMATION:
+	case SMB2_FILE_ID_BOTH_DIRECTORY_INFORMATION:
+	case SMB2_FILE_ID_FULL_DIRECTORY_INFORMATION:
+		break;
+	default:
 		smbd_log("listing: class %u not answered", req->file_information_class);
 		return reply(smb2, SMB2_QUERY_DIRECTORY, SMB2_STATUS_INVALID_INFO_CLASS);
 	}
@@ -1132,17 +1138,14 @@ static int change_notify(struct smb2_server *srvr, struct smb2_context *smb2, st
 		return reply(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_INSUFFICIENT_RESOURCES);
 	{
 		struct notify *n = &c->notifies[slot];
-		struct smb2_pdu *waiting;
 
 		n->used = 1;
-		n->message_id = smb2->message_id;
+		n->message_id = smb2_get_last_request_message_id(smb2);
 		n->async_id = 0;
 		n->handle = (int)(h - c->handles);
 		reply(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_PENDING);
 		/* libsmb2 gave the interim reply an async id and kept the request waiting, marked with it */
-		waiting = smb2_find_pdu(smb2, n->message_id);
-		if (waiting && (waiting->header.flags & SMB2_FLAGS_ASYNC_COMMAND))
-			n->async_id = waiting->header.async.async_id;
+		n->async_id = smb2_get_async_id(smb2, n->message_id);
 		if (smbd_trace)
 			smbd_log("change notify on %s left pending (message %llu, async id %llu)", h->path,
 			         (unsigned long long)n->message_id, (unsigned long long)n->async_id);

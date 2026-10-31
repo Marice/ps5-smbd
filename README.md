@@ -64,7 +64,7 @@ The tests in `tests/` are libsmb2 clients run against `make host`:
 - `client.c`: write, read, rename, list, delete;
 - `shares.c`: the share list, and a drive under mnt as a share of its own;
 - `notify.c`: change notify and cancel;
-- `preauth.c`: raw requests out of turn: before a login (a cancel, a tree connect, a create first) they drop that client, not the server; a second session setup after a login is refused and the first session goes on;
+- `preauth.c`: raw requests out of turn: before a login (a cancel, a tree connect, a create first) they drop that client, not the server; after a login, a session setup for a session the connection does not have is answered USER_SESSION_DELETED and the first session goes on, and one for a new session takes the first one's place, whose requests then get USER_SESSION_DELETED;
 - `cmac.c`: the signing's AES-CMAC against RFC 4493 and the portable code, over whole messages and in pieces, and its speed;
 - `review.c`: what the code review found (pipe rename, failed compounds, wildcards, names that are not UTF-8, unknown set-info classes, FileAllInformation's name).
 
